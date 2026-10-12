@@ -1,0 +1,6 @@
+# Historical source-snapshot integrity: these fixture files are byte-identical
+# copies fetched verbatim from trustwallet/wallet-core (see provenance.json).
+# Their raw-byte SHA-256 values are verified by tests/test_fixtures_integrity.py,
+# so Git must never convert line endings on checkout — even on Windows.
+fixtures/source-snapshots/Random.cpp@69b2da9826df.txt text eol=lf
+fixtures/source-snapshots/Random.cpp@d3c2eee16b15.txt text eol=lf

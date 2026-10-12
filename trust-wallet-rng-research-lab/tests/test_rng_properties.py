@@ -1,5 +1,6 @@
 import math
 import os, random
+from itertools import product
 import pytest
 from rng_research.rng_properties import (chi_square_frequency, monobit,
                                          serial_correlation, poker_test,
@@ -189,14 +190,22 @@ def test_poker_df_is_m_minus_one_not_k_minus_one():
 def test_poker_df_reflects_m_in_threshold_note():
     """df advertised in the result must track m, not the alphabet size k.
 
-    Uses m = 2 with n = 16**3 groups: E_1 = 16*16 = 256 and
-    E_2 = (16**4 - 16**3)/2 = 19440 are exact integers, so a stream whose
-    class histogram matches them forces stat == 0 mathematically under the
-    df = m-1 = 1 model (the old k-1 code would have reported df = 15).
+    Uses m = 4 with n = 16**4 groups.  The class counts are the exact
+    integers E_j = S(4,j)*(16)_j * 16**(4-4) = {16, 1680, 20160, 43680}
+    (sum = 65536 = 16**4), so a stream whose class histogram matches them
+    forces stat == 0 mathematically under the df = m-1 = 3 model — the old
+    k-1 code would have reported df = 15 in threshold_note.
+
+    Note on construction: poker_test extracts nibbles from bytes in *low
+    first* order (byte & 0xF, then byte >> 4), while _to_payload packs the
+    tuple as (g[0] << 4 | g[1]).  To keep every group's class invariant we
+    reverse each tuple before packing — reversing does not change the number
+    of distinct values in a group.  Every distinct tuple is used exactly
+    once (counts[j] == number of tuples of class j for m=k=4), so no
+    rejection sampling or pool exhaustion occurs.
     """
     def _groups_exact(m: int, k: int, counts: list[int], seed: int):
-        """Exhaustively enumerate ALL k**m tuples of a given class — no
-        rejection sampling, so every expected count is hit exactly."""
+        """Exhaustively enumerate ALL k**m tuples of a given class."""
         rng = random.Random(seed)
         all_tuples = [tuple(t) for t in product(range(k), repeat=m)]
         rng.shuffle(all_tuples)
@@ -209,11 +218,15 @@ def test_poker_df_reflects_m_in_threshold_note():
             groups.extend(pool[:counts[j]])
         return groups
 
-    counts = [0, 256, 19440]  # n=16**3 groups, m=2, k=16 (exact integers)
-    payload = _to_payload(_groups_exact(2, 16, counts, seed=7))
-    assert len(payload) == sum(counts[1:])  # 2 nibbles packed per byte
-    r = poker_test(payload, m=2)
-    assert "df=1" in r.threshold_note
+    # Exact H0 expectation for m=4, k=16: P(j)=S(4,j)(16)_j/16^4 => E_j =
+    # S(4,j)*(16)_j, all integers and all <= available distinct tuples.
+    counts = [0, 16, 1680, 20160, 43680]
+    assert sum(counts) == 16 ** 4
+    groups = [tuple(reversed(g)) for g in _groups_exact(4, 16, counts, seed=7)]
+    payload = _to_payload(groups)
+    assert len(payload) == 2 * sum(counts[1:])  # 4 nibbles packed per 2 bytes
+    r = poker_test(payload, m=4)
+    assert "df=3" in r.threshold_note
     assert r.statistic == pytest.approx(0.0, abs=1e-9)
     assert r.passed
 
