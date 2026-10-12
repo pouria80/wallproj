@@ -1,0 +1,2 @@
+# Development/test dependencies (core package has zero runtime deps)
+pytest>=7,<9

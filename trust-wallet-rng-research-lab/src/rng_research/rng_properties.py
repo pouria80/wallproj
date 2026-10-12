@@ -1,0 +1,143 @@
+"""Statistical property tests for byte streams.
+
+IMPORTANT: these are *statistical* tests only. Passing them never proves a
+generator is cryptographically secure; they mainly demonstrate the converse —
+that plausible-looking output can come from very low-entropy sources (which is
+exactly why the mt19937-with-32-bit-seed bug was not visible in distribution
+plots).
+
+Implemented with math/statistics stdlib only (chi-square, monobit, poker,
+serial-correlation) so results are reproducible offline.
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Sequence
+
+
+@dataclass
+class TestResult:
+    name: str
+    passed: bool
+    statistic: float
+    p_value: float | None
+    threshold_note: str
+
+
+def chi_square_frequency(data: Sequence[int], alphabet: int = 256) -> TestResult:
+    """Uniformity of symbol frequencies over `alphabet` categories."""
+    n = len(data)
+    if n == 0:
+        raise ValueError("empty data")
+    if any(not (0 <= x < alphabet) for x in data):
+        raise ValueError("symbols outside [0, alphabet)")
+    counts = [0] * alphabet
+    for x in data:
+        counts[x] += 1
+    expected = n / alphabet
+    stat = sum((c - expected) ** 2 / expected for c in counts)
+    df = alphabet - 1
+    # Wilson–Hilferty approximation for chi-square CDF
+    z = ((stat / df) ** (1 / 3.0) - (1 - 2 / (9 * df))) / math.sqrt(2 / (9 * df))
+    p = 1 - _norm_cdf(z)
+    return TestResult("chi_square_frequency", p > 0.01, stat, p,
+                      "pass if p > 0.01 (heuristic)")
+
+
+def monobit(data: Sequence[int]) -> TestResult:
+    """Balance of 0/1 bits across the stream."""
+    bits = _to_bits(data)
+    n = len(bits)
+    if n == 0:
+        raise ValueError("empty data")
+    s = sum(1 << 0 if b else 0 for b in bits) * 2 - n  # +1/-1 sum
+    stat = abs(s) / math.sqrt(n)
+    p = math.erfc(stat / math.sqrt(2))
+    return TestResult("monobit", p > 0.01, stat, p, "pass if p > 0.01")
+
+
+def serial_correlation(data: Sequence[int], lag: int = 1) -> TestResult:
+    """Pearson correlation between x[i] and x[i+lag]; ~0 for good streams."""
+    if len(data) < lag + 2:
+        raise ValueError("not enough data for requested lag")
+    xs = list(data[:-lag])
+    ys = list(data[lag:])
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    vx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    vy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    r = cov / (vx * vy) if vx and vy else 0.0
+    # two-sided normal approx for |r| under H0
+    z = abs(r) * math.sqrt(len(xs))
+    p = math.erfc(z / math.sqrt(2))
+    return TestResult(f"serial_correlation_lag{lag}", p > 0.01, r, p,
+                      "pass if |r|·√n small (p > 0.01)")
+
+
+def poker_test(data: Sequence[int], m: int = 4, k: int = 16) -> TestResult:
+    """Classic poker test on nibbles: m=4 bits, k=16 possible patterns."""
+    nibbles = []
+    for byte in data:
+        nibbles.append(byte & 0xF)
+        nibbles.append((byte >> 4) & 0xF)
+    n_groups = len(nibbles) // m
+    if n_groups == 0:
+        raise ValueError("not enough data for poker test")
+    groups = [tuple(nibbles[i * m:(i + 1) * m]) for i in range(n_groups)]
+    counts: dict[tuple[int, ...], int] = {}
+    for g in groups:
+        counts[g] = counts.get(g, 0) + 1
+    vi = [0] * k
+    for cnt in counts.values():
+        vi[cnt] = vi.get(cnt, 0) + cnt
+    # recompute properly: number of classes appearing j times
+    freq = [0] * (k + 1)
+    for cnt in counts.values():
+        if cnt <= k:
+            freq[cnt] += 1
+    vj = freq  # vj[j] = number of patterns seen exactly j times
+    stat = (k ** m / n_groups) * sum(vj * j * j for j in range(1, k + 1)) - n_groups
+    # correction because only observed patterns contribute
+    stat = (k ** m / n_groups) * sum(vj * (j ** 2) for j in range(1, k + 1)) - n_groups
+    df = k - 1
+    z = ((stat / df) ** (1 / 3.0) - (1 - 2 / (9 * df))) / math.sqrt(2 / (9 * df)) if stat > 0 else -5.0
+    p = 1 - _norm_cdf(z)
+    return TestResult("poker", p > 0.01, stat, p, "pass if p > 0.01 (approx.)")
+
+
+def entropy_estimate(data: Sequence[int], alphabet: int = 256) -> float:
+    """Shannon entropy of the empirical byte distribution, bits/byte."""
+    n = len(data)
+    if n == 0:
+        return 0.0
+    counts: dict[int, int] = {}
+    for x in data:
+        counts[x] = counts.get(x, 0) + 1
+    h = -sum((c / n) * math.log2(c / n) for c in counts.values())
+    return h
+
+
+def distinct_ratio(data: Sequence[int]) -> float:
+    """Fraction of unique symbols — crude repetition detector."""
+    if not data:
+        raise ValueError("empty data")
+    return len(set(data)) / len(data)
+
+
+def run_all_tests(data: Sequence[int]) -> list[TestResult]:
+    results = [chi_square_frequency(data), monobit(data),
+               serial_correlation(data, lag=1), poker_test(data)]
+    return results
+
+
+def _to_bits(data: Sequence[int]) -> list[int]:
+    bits: list[int] = []
+    for byte in data:
+        for i in range(8):
+            bits.append((byte >> i) & 1)
+    return bits
+
+
+def _norm_cdf(z: float) -> float:
+    return 0.5 * math.erfc(-z / math.sqrt(2))

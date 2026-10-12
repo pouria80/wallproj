@@ -1,0 +1,16 @@
+{
+  "sha": "d3c2eee16b154cbb69e8959b01e5e71fbabb1212",
+  "parents": [
+    "69b2da9826dfdeb8116be1e5a3747b3e9418592d"
+  ],
+  "date": "2022-11-21T15:16:14Z",
+  "message": "[emscripten]: use javascript for random generation (#2750)\n\n* feat(wasm): use javascript for random generation\r\n* feat(wasm): fix per review\r\n* add link to libsodium",
+  "files": [
+    {
+      "filename": "wasm/src/Random.cpp",
+      "status": "modified",
+      "changes": 76
+    }
+  ],
+  "html_url": "https://github.com/trustwallet/wallet-core/commit/d3c2eee16b154cbb69e8959b01e5e71fbabb1212"
+}
