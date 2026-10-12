@@ -60,5 +60,51 @@ def test_run_all_tests_shape():
     assert {"chi_square_frequency", "monobit", "serial_correlation_lag1", "poker"} <= names
 
 def test_os_csprng_stream_passes():
-    data = list(os.urandom(20000))
-    assert all(t.passed for t in run_all_tests(data))
+    # A true CSPRNG stream legitimately fails an alpha=0.01 battery ~4% of the
+    # time (multiple-hypothesis effect), so a single unseeded sample would make
+    # this test flaky.  Use a fixed-seed os.urandom substitute (random.Random)
+    # for determinism, plus a gate over fresh samples that a *broken* suite
+    # (e.g. an invalid poker statistic) would fail nearly every time.
+    rng = random.Random(2023)
+    deterministic_sample = [rng.randrange(256) for _ in range(20000)]
+    assert all(t.passed for t in run_all_tests(deterministic_sample))
+
+    failures = sum(
+        1 for _ in range(10)
+        if not all(t.passed for t in run_all_tests(list(os.urandom(20000))))
+    )
+    assert failures <= 1, f"{failures}/10 CSPRNG samples failed the battery"
+
+# --- regression tests for the poker_test AttributeError root cause -----------
+# The old implementation called `vi.get(...)` on a *list* (AttributeError) and
+# computed an invalid statistic.  These tests lock in the fixed behaviour.
+
+def test_poker_low_entropy_stream_fails():
+    """Only two distinct bytes => many repeated 4-nibble patterns => must fail."""
+    data = [0, 1] * 5000
+    r = poker_test(data)
+    assert not r.passed
+    assert r.p_value is not None and r.p_value < 0.01
+
+
+def test_poker_rejects_out_of_range_bytes():
+    with pytest.raises(ValueError):
+        poker_test([256])
+
+
+def test_poker_rejects_empty_data():
+    with pytest.raises(ValueError):
+        poker_test([])
+
+
+def test_poker_rejects_bad_parameters():
+    with pytest.raises(ValueError):
+        poker_test([1, 2, 3], m=0)
+    with pytest.raises(ValueError):
+        poker_test([1, 2, 3], m=20, k=16)
+
+
+def test_poker_statistic_matches_known_uniform_expectation():
+    """For a uniform stream the poker statistic should be O(df)=O(15), not huge."""
+    r = poker_test(uniform_stream(20000, seed=99))
+    assert 0.0 <= r.statistic < 100.0

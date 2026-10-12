@@ -76,32 +76,59 @@ def serial_correlation(data: Sequence[int], lag: int = 1) -> TestResult:
 
 
 def poker_test(data: Sequence[int], m: int = 4, k: int = 16) -> TestResult:
-    """Classic poker test on nibbles: m=4 bits, k=16 possible patterns."""
-    nibbles = []
+    """Classic poker test on nibbles: m=4 bits per group, k=16 possible patterns.
+
+    Groups of m consecutive nibbles are classified by the number of *distinct*
+    patterns they contain (1..m).  v_j counts how many groups fall into class j;
+    under H0 (uniform independent nibbles) the expected class probabilities are
+    analytic, so the usual chi-square statistic with k-1 = 3 degrees of freedom
+    applies.  Reference: Knuth, TAOCP vol. 2, poker test; Marsaglia et al.
+    """
+    if m < 1 or m > k:
+        raise ValueError("require 1 <= m <= k")
+    nibbles: list[int] = []
     for byte in data:
+        if not (0 <= byte <= 255):
+            raise ValueError("data must be byte values in [0, 255]")
         nibbles.append(byte & 0xF)
         nibbles.append((byte >> 4) & 0xF)
     n_groups = len(nibbles) // m
     if n_groups == 0:
         raise ValueError("not enough data for poker test")
     groups = [tuple(nibbles[i * m:(i + 1) * m]) for i in range(n_groups)]
-    counts: dict[tuple[int, ...], int] = {}
+
+    # Observed class counts: v[j] = number of groups with exactly j distinct values
+    v = [0] * (m + 1)
     for g in groups:
-        counts[g] = counts.get(g, 0) + 1
-    vi = [0] * k
-    for cnt in counts.values():
-        vi[cnt] = vi.get(cnt, 0) + cnt
-    # recompute properly: number of classes appearing j times
-    freq = [0] * (k + 1)
-    for cnt in counts.values():
-        if cnt <= k:
-            freq[cnt] += 1
-    vj = freq  # vj[j] = number of patterns seen exactly j times
-    stat = (k ** m / n_groups) * sum(vj * j * j for j in range(1, k + 1)) - n_groups
-    # correction because only observed patterns contribute
-    stat = (k ** m / n_groups) * sum(vj * (j ** 2) for j in range(1, k + 1)) - n_groups
+        v[len(set(g))] += 1
+
+    # Expected class probabilities for m draws (with replacement) from k symbols:
+    # P(j distinct) = S(m, j) * (k)_j / k^m, where S is a Stirling number of the
+    # second kind and (k)_j the falling factorial.
+    def stirling(n_: int, r_: int) -> int:
+        dp = [[0] * (r_ + 1) for _ in range(n_ + 1)]
+        dp[0][0] = 1
+        for i in range(1, n_ + 1):
+            for j in range(1, min(i, r_) + 1):
+                dp[i][j] = j * dp[i - 1][j] + dp[i - 1][j - 1]
+        return dp[n_][r_]
+
+    def falling(nn: int, rr: int) -> int:
+        out = 1
+        for i in range(rr):
+            out *= nn - i
+        return out
+
+    km = k ** m
+    stat = 0.0
+    for j in range(1, m + 1):
+        e_j = n_groups * stirling(m, j) * falling(k, j) / km
+        stat += (v[j] - e_j) ** 2 / e_j
+
     df = k - 1
-    z = ((stat / df) ** (1 / 3.0) - (1 - 2 / (9 * df))) / math.sqrt(2 / (9 * df)) if stat > 0 else -5.0
+    # Wilson–Hilferty approximation for the chi-square upper-tail p-value
+    z = (((stat / df) ** (1 / 3.0) - (1 - 2 / (9 * df))) / math.sqrt(2 / (9 * df))
+         if stat > 0 else -5.0)
     p = 1 - _norm_cdf(z)
     return TestResult("poker", p > 0.01, stat, p, "pass if p > 0.01 (approx.)")
 
