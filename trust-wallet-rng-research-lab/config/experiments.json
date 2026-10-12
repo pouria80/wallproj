@@ -1,0 +1,25 @@
+{
+  "description": "Experiment suite configuration for rng_research. Categories are kept separate: real-evidence / modelling / security-fix.",
+  "experiments": {
+    "E1-source-snapshot-analysis": {
+      "enabled": true,
+      "params": {}
+    },
+    "E2-modelling-seed-collapse": {
+      "enabled": true,
+      "params": { "draws": 40000, "buffer_len": 16 }
+    },
+    "E3-modelling-stats-deception": {
+      "enabled": true,
+      "params": { "bytes": 20000 }
+    },
+    "E4-secure-rng-properties": {
+      "enabled": true,
+      "params": { "samples": 20000 }
+    },
+    "E5-node-bridge-check": {
+      "enabled": true,
+      "params": {}
+    }
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "records": [
+    {
+      "claim": "CVE-2023-31290 (GHSA-pm4f-pggw-8jwc) affects Trust Wallet Core before 3.1.1, as used in the Trust Wallet browser extension versions 0.0.172 through 0.0.182; root cause is 32-bit entropy from mt19937 seeded with a single 32-bit value.",
+      "source": "https://github.com/advisories/GHSA-pm4f-pggw-8jwc",
+      "locator": "advisory GHSA-pm4f-pggw-8jwc / CVE-2023-31290; CVSS 5.9 vector CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "method": "Fetched advisory JSON live from api.github.com on 2026-10-12; saved verbatim at fixtures/source-snapshots/GHSA-pm4f-pggw-8jwc.json",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Primary source (GitHub Security Advisory). Extension version range 0.0.172–0.0.182 stated in advisory text itself."
+    },
+    {
+      "claim": "The vulnerable RNG for the WASM build lived in wasm/src/Random.cpp and constructed a fresh std::mt19937 per call seeded by std::random_device{}() in both random32() and random_buffer().",
+      "source": "https://github.com/trustwallet/wallet-core",
+      "locator": "wasm/src/Random.cpp @ commit 69b2da9826dfdeb8116be1e5a3747b3e9418592d (lines 13-19)",
+      "method": "Downloaded byte-exact file at that commit via raw.githubusercontent.com; sha256 f8dea1b9bd1e7057a0f7166ef372e3b34fc4a96eb7fa9e31bbd137beb8c5aab1 stored in fixtures/source-snapshots/",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Direct source verification, not secondary reporting."
+    },
+    {
+      "claim": "Fix commit d3c2eee16b154cbb69e8959b01e5e71fbabb1212 ('[emscripten]: use javascript for random generation (#2750)', 2022-11-21) replaced the C++ <random> usage with EM_ASM bridges to crypto.getRandomValues (browser) and Node crypto.randomBytes, failing closed otherwise.",
+      "source": "https://github.com/trustwallet/wallet-core/commit/d3c2eee16b154cbb69e8959b01e5e71fbabb1212",
+      "locator": "commit d3c2eee16b15..., parent 69b2da9826df..., only file changed: wasm/src/Random.cpp",
+      "method": "Commit metadata + diff fetched from GitHub API on 2026-10-12; post-fix file downloaded at same commit (sha256 609bb7543f9d0d1200f7e62c69c428e805b5e2b4600ece2e60656216ae7f096f); local diff of the two snapshots saved as fixtures/patches/d3c2eee16b15.diff",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Verified files list contains exactly one modified file."
+    },
+    {
+      "claim": "The fix commit is tagged as release 3.1.1, matching the advisory's 'before 3.1.1' boundary.",
+      "source": "https://github.com/trustwallet/wallet-core/tags",
+      "locator": "tag 3.1.1 -> commit d3c2eee16b15...; tag 3.1.0 -> commit efca5eeef5ab...",
+      "method": "Tag listing retrieved via API pages 1-6 on 2026-10-12; tag->sha mapping recorded in docs/historical-source-analysis.md",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Note: tags are named without leading 'v' (e.g. '3.1.1'), unlike many repos."
+    },
+    {
+      "claim": "wasm/src/Random.cpp was introduced by commit 5b8beb939d08b2b252afff72aeb1388a95d1de19 ('Add Random for wasm (#2240)', 2022-05-24) already containing the mt19937 pattern; content identical through v3.0.0..3.1.0.",
+      "source": "https://api.github.com/repos/trustwallet/wallet-core/commits?path=wasm/src/Random.cpp",
+      "locator": "commit 5b8beb939d08...; verified identical text also at tag 3.0.0 (200bd11232c4...)",
+      "method": "Path history via commits API + raw file fetch at tag 3.0.0 compared visually/by hash",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Establishes earliest wallet-core version carrying the WASM RNG (file added May 2022)."
+    },
+    {
+      "claim": "Effective mnemonic entropy of wallets created by the affected extension builds is bounded by ~32 bits (~4.3 billion possible mnemonics), versus 128+ bits expected from BIP-39.",
+      "source": "https://github.com/advisories/GHSA-pm4f-pggw-8jwc + code analysis",
+      "locator": "random_buffer() fed 16 bytes of entropy to mnemonic generation while each byte stream derives from one 32-bit seed (mt19937 reseeded per call)",
+      "method": "Advisory states it explicitly; our static analysis confirms the per-call reseeding structure; modelling experiment E2 reproduces the state-space collapse mechanism synthetically",
+      "status": "partially_confirmed",
+      "confidence": "medium",
+      "notes": "The exact number of DISTINCT mnemonics reachable depends on how wallet-core consumed random_buffer across multiple calls (per-call reseeding means each 16-byte buffer has ≤2^32 variants; combined multi-buffer entropy is still capped per-buffer at 32 bits). We did NOT rebuild/run the historical WASM binary, so end-to-end mnemonic enumeration count is inferred, not executed."
+    },
+    {
+      "claim": "In the vulnerable Emscripten builds, std::random_device was additionally weak/deterministic at runtime (Emscripten historically returned a fixed sequence unless polyfilled), compounding the 32-bit seed bottleneck.",
+      "source": "secondary reports (Ledger blog, community analyses) + Emscripten changelog",
+      "locator": "Emscripten random_device behavior pre-3.x toolchains",
+      "method": "Not directly testable here without building the historical WASM; flagged for further access",
+      "status": "needs_more_access",
+      "confidence": "low",
+      "notes": "Plausible and widely reported, but we did not verify the exact toolchain behaviour of the shipped build. The 32-bit mt19937 seed cap holds regardless of random_device quality — that part IS confirmed from source."
+    },
+    {
+      "claim": "Exploitation occurred in the wild in December 2022 and March 2023 against extension-created wallets.",
+      "source": "https://github.com/advisories/GHSA-pm4f-pggw-8jwc",
+      "locator": "advisory description",
+      "method": "Advisory text; corroborated by Ledger's public post-mortem (listed in references)",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Secondary corroboration: https://www.ledger.com/blog/funds-of-every-wallet-created-with-the-trust-wallet-browser-extension-could-have-been-stolen"
+    },
+    {
+      "claim": "The patched JS bridge falls back in order: window.crypto/msCrypto getRandomValues → Node require('crypto').randomBytes → throw 'No secure random number generator found'.",
+      "source": "fixtures/source-snapshots/Random.cpp@d3c2eee16b15.txt",
+      "locator": "javascript_stir() EM_ASM block, lines ~25-50",
+      "method": "Direct read of post-fix snapshot; logic transcribed and executed under Node.js in experiment E5 (when node available)",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Fail-closed design verified statically; E5 verifies the transcription runs."
+    },
+    {
+      "claim": "random_buffer() in the FIXED version emits one byte per uint32 draw (truncating 24 bits per call) — statistically uniform but wasteful; security comes from the CSPRNG backing, not bit-efficiency.",
+      "source": "fixtures/source-snapshots/Random.cpp@d3c2eee16b15.txt",
+      "locator": "javascript_buf(): p[i] = (unsigned char) javascript_random();",
+      "method": "Static reading of the loop body",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Relevant nuance often missed in secondary write-ups."
+    },
+    {
+      "claim": "Passing basic statistical uniformity tests does not imply cryptographic security; a 32-bit-seeded MT19937 stream passes chi-square/monobit/correlation checks while having ≤32 bits effective entropy.",
+      "source": "this lab's experiments",
+      "locator": "experiment E3-modelling-stats-deception",
+      "method": "Reproducible run: python -m rng_research.cli run-experiments --experiment E3-modelling-stats-deception",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Demonstrated on a clearly-labelled MODEL, not on historical binary output."
+    },
+    {
+      "claim": "All browser-extension wallets created with versions 0.0.172–0.0.182 during that period must be treated as potentially compromised; users should upgrade AND move funds.",
+      "source": "GHSA advisory + Ledger post-mortem",
+      "locator": "advisory remediation guidance",
+      "method": "Advisory text; operational advice outside this lab's scope to verify individually",
+      "status": "partially_confirmed",
+      "confidence": "medium",
+      "notes": "Per-wallet status cannot be determined offline; this is guidance, not a claim we can test."
+    }
+  ]
+}
