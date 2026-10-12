@@ -76,16 +76,41 @@ def serial_correlation(data: Sequence[int], lag: int = 1) -> TestResult:
 
 
 def poker_test(data: Sequence[int], m: int = 4, k: int = 16) -> TestResult:
-    """Classic poker test on nibbles: m=4 bits per group, k=16 possible patterns.
+    """Classic poker test on nibbles: groups of m nibbles over a k-symbol alphabet.
 
-    Groups of m consecutive nibbles are classified by the number of *distinct*
-    patterns they contain (1..m).  v_j counts how many groups fall into class j;
-    under H0 (uniform independent nibbles) the expected class probabilities are
-    analytic, so the usual chi-square statistic with k-1 = 3 degrees of freedom
-    applies.  Reference: Knuth, TAOCP vol. 2, poker test; Marsaglia et al.
+    Each group of m consecutive nibbles is classified by the number of *distinct*
+    nibble values it contains, giving classes j = 1..m.  Under H0 (uniform,
+    independent nibbles) the class probabilities are analytic:
+
+        P(j) = S(m, j) * (k)_j / k**m
+
+    where S is a Stirling number of the second kind and (k)_j the falling
+    factorial.  Because every class has strictly positive probability and the
+    class counts are multinomial, there are exactly m categories and the
+    chi-square statistic carries **m - 1 degrees of freedom** (for the default
+    m = 4, k = 16 that is df = 3 — *not* k - 1).  Reference: Knuth, TAOCP
+    vol. 2, poker test; Marsaglia, Blumenthal, Fernholz & Vardi (1964).
+
+    Parameter contract:
+      * ``m`` must satisfy ``m >= 2``.  With m = 1 every group is trivially of
+        class 1, the statistic is identically 0 and df would be 0, which is
+        undefined for the chi-square approximation — such input is rejected.
+      * ``k`` must equal 16: this implementation derives nibbles from bytes
+        (values 0..15), so any other declared alphabet would silently mismatch
+        the real data and yield an invalid test.
     """
-    if m < 1 or m > k:
-        raise ValueError("require 1 <= m <= k")
+    if k != 16:
+        raise ValueError(
+            "k must be 16: the poker test here operates on nibbles extracted "
+            "from bytes (alphabet 0..15); other alphabets are not supported"
+        )
+    if m < 2:
+        raise ValueError(
+            "m must be >= 2: with m = 1 all groups collapse into a single "
+            "class, giving a degenerate test with zero degrees of freedom"
+        )
+    if m > k:
+        raise ValueError("require m <= k")
     nibbles: list[int] = []
     for byte in data:
         if not (0 <= byte <= 255):
@@ -103,8 +128,7 @@ def poker_test(data: Sequence[int], m: int = 4, k: int = 16) -> TestResult:
         v[len(set(g))] += 1
 
     # Expected class probabilities for m draws (with replacement) from k symbols:
-    # P(j distinct) = S(m, j) * (k)_j / k^m, where S is a Stirling number of the
-    # second kind and (k)_j the falling factorial.
+    # P(j distinct) = S(m, j) * (k)_j / k^m.
     def stirling(n_: int, r_: int) -> int:
         dp = [[0] * (r_ + 1) for _ in range(n_ + 1)]
         dp[0][0] = 1
@@ -125,12 +149,14 @@ def poker_test(data: Sequence[int], m: int = 4, k: int = 16) -> TestResult:
         e_j = n_groups * stirling(m, j) * falling(k, j) / km
         stat += (v[j] - e_j) ** 2 / e_j
 
-    df = k - 1
+    df = m - 1  # m multinomial classes with positive probability => m-1 df
     # Wilson–Hilferty approximation for the chi-square upper-tail p-value
+    # (safe here because validation guarantees df >= 1).
     z = (((stat / df) ** (1 / 3.0) - (1 - 2 / (9 * df))) / math.sqrt(2 / (9 * df))
          if stat > 0 else -5.0)
     p = 1 - _norm_cdf(z)
-    return TestResult("poker", p > 0.01, stat, p, "pass if p > 0.01 (approx.)")
+    return TestResult("poker", p > 0.01, stat, p,
+                      f"pass if p > 0.01 (chi-square, df={df})")
 
 
 def entropy_estimate(data: Sequence[int], alphabet: int = 256) -> float:
