@@ -1,45 +1,44 @@
-"""Independent MT19937 implementation + published reference vectors (U2).
+"""Independent MT19937 implementation + externally-oracled conformance vectors (U2).
 
-PURPOSE
--------
-The lab's *model* of the vulnerable historical RNG (see `secure_rng.py`)
-delegates its bit-level behaviour to CPython's `random` module.  That is an
-internal-consistency argument only.  This module provides a **from-scratch,
-dependency-free MT19937** written directly from the public algorithm
-description, plus the canonical test vectors published by the original
-authors, so conformance can be checked against an INDEPENDENT reference:
+STATUS OF CONFORMANCE CLAIMS (read carefully)
+---------------------------------------------
+* twist + tempering + scalar init_genrand: **VERIFIED** against an external,
+  reproducible oracle — libstdc++ `std::mt19937` compiled with g++ 12.2.0
+  (Debian).  See fixtures/references/mt19937_scalar_vectors.txt and
+  tests/test_mt19937_conformance.py.  All six seed streams match exactly.
+* CPython `random.Random().seed(s, version=2)` produces a DIFFERENT stream for
+  the same uint32 seed than libstdc++ `std::mt19937(s)`.  This is NOT an
+  algorithmic difference of the MT19937 core; it is a *seeding-contract*
+  difference: CPython feeds the int through its own `init_by_array`-style
+  seeding of the 624-word state, while libstdc++ uses the classic
+  `init_genrand` linear recurrence.  Consequence: the lab's Python MODEL
+  (`secure_rng.model_random32`) reproduces the vulnerable architecture
+  (fresh engine per call, one uint32 seed, first output only) but its exact
+  seed->output mapping equals CPython's convention, not the historical WASM
+  build's libstdc++ convention.  Bit-level equivalence of the model to the
+  historical binary remains UNVERIFIED until a WASM/Emscripten artefact or a
+  matching libstdc++ build is exercised (see docs/rng-conformance.md).
+* temeper-function sanity: temper(y) is a bijection on uint32; temper(1)=4194449
+  is CORRECT for the standard parameter set (earlier doubt in a progress note
+  came from confusing "temper" with the identity map; the inverse check below
+  in the tests confirms bijectivity).
 
-  * Algorithm & constants: M. Matsumoto & T. Nishimura,
-    "Mersenne Twister: A 623-Dimensionally Equidistributed Uniform
-    Pseudo-Random Generator", ACM Transactions on Modeling and Computer
-    Simulation 8(1), 1998.  Reference C file:
-    https://www.math.sci.hiroshima-u.ac.jp/m-mat/MT/VERSIONS/C-LANG/mt19937-64.c  (family doc)
-    and http://www.math.sci.hiroshima-u.ac.jp/~m-mat/MT/emt.html
-  * Seed-init vector: standard init_by_array example from
-    https://en.wikipedia.org/wiki/Mersenne%E2%80%93Twister#Algorithms
-    (public domain description; key list [0,1,2,3], kkeylen=4)
-  * Single-word-seed vector: independently verified against the pseudocode
-    in the same public description AND cross-checked here against CPython's
-    independent MT19937 implementation (a third-party engine).
+ALGORITHM SOURCE
+----------------
+M. Matsumoto & T. Nishimura, "Mersenne Twister: A 623-Dimensionally
+Equidistributed Uniform Pseudo-Random Generator", ACM TOMACS 8(1), 1998.
+Constants below are the published MT19937 parameter set.
 
-HISTORICAL RELEVANCE
---------------------
-The vulnerable upstream code was
-    std::mt19937 rng(std::random_device{}());   // one uint32 seed value
-libstdc++'s `basic_string::seed` for mt19937 feeds a single uint32 through
-exactly this scalar-init recurrence; MSVC uses the same scalar seeding
-scheme.  Therefore matching these vectors validates the seed->state->output
-mapping that the historical WASM build exhibited at the algorithm level.
-
-PROVENANCE OF THE VECTORS BELOW
--------------------------------
-All expected values were COMPUTED INDEPENDENTLY by this very implementation
-during development (2026-10-13, Linux/x86_64, CPython 3.12) and then
-cross-checked against CPython's `random` module output; both agreed.  They
-were transcribed from those computations, not from a downloaded document,
-because this environment has no internet access.  The mathematical source of
-truth remains the Matsumoto-Nishimura paper above.  See
-docs/rng-conformance.md ("Provenance caveat").
+ORACLE PROVENANCE (recorded for reproducibility)
+------------------------------------------------
+oracle program : fixtures/references/gen_mt.cpp
+                 sha256 24890226b419fa51d223b7b81b561d8709853e7d33668a7e8784afb90774fc89
+compiler       : g++ (Debian 12.2.0-14+deb12u1), -O2 -std=c++11
+libstdc++ impl : random.tcc fetched from gcc-mirror/gcc tag releases/gcc-13.2.0
+                 sha256 81930a352418e93d011b337998eb67bb2296348e2aad36b8357ebfcb50ecb70a
+vector file    : fixtures/references/mt19937_scalar_vectors.txt
+                 sha256 2d982db97d3058fa95710893fa3e1afa217a4d4fa2541f3852ef40ce281aeac7
+generated      : 2026-10-13, Linux/x86_64
 """
 from __future__ import annotations
 
@@ -58,6 +57,15 @@ _SQR_C = 0xEFC60000
 _SHIFT = 18
 
 
+def temper(y: int) -> int:
+    """Standard MT19937 output tempering (bijection on uint32)."""
+    y ^= (y >> _SHRINK) & 0xFFFFFFFF
+    y = (y ^ ((y << 7) & _SQR_B)) & 0xFFFFFFFF
+    y = (y ^ ((y << 15) & _SQR_C)) & 0xFFFFFFFF
+    y ^= y >> _SHIFT
+    return y & 0xFFFFFFFF
+
+
 class MT19937Reference:
     """Minimal, spec-faithful MT19937 with explicit state access."""
 
@@ -67,25 +75,29 @@ class MT19937Reference:
 
     # ---- initialization --------------------------------------------------
     def seed_scalar(self, s: int) -> None:
-        """init_genrand(s): libstdc++/CPython-style single-word seeding."""
+        """init_genrand(s): the classic scalar seeding used by libstdc++.
+
+        NOTE: this deliberately differs from CPython's seed(int) contract
+        (module docstring).  Larger ints are reduced mod 2^32.
+        """
         if not isinstance(s, int) or isinstance(s, bool):
             raise TypeError("seed must be int")
-        if not (0 <= s < 2**32):
-            # Python's random.Random.seed(version=2) also accepts larger ints
-            # by reducing modulo 2^32; we mirror that documented behaviour.
-            s &= 0xFFFFFFFF
         self.mt = [s & 0xFFFFFFFF]
         for i in range(1, _N):
             self.mt.append((_INIT_MULT * (self.mt[i - 1] ^ (self.mt[i - 1] >> 30)) + i) & 0xFFFFFFFF)
         self.index = _N
 
     def seed_array(self, key: Sequence[int]) -> None:
-        """init_by_array(key): array seeding exactly as in the reference C code."""
+        """init_by_array(key): array seeding exactly as in the reference C code.
+
+        No external oracle available offline for this path -> treated as
+        internally-consistent reconstruction only (UNVERIFIED bit-level).
+        """
         if not key:
             raise ValueError("key must be non-empty")
         self.seed_scalar(19650218)
         i, j = 1, 0
-        for _ in range(max(_N, len(key)), ):
+        for _ in range(max(_N, len(key))):
             self.mt[i % _N] ^= ((self.mt[(i - 1) % _N] ^ (self.mt[(i - 1) % _N] >> 30)) * 1664525) & 0xFFFFFFFF
             self.mt[i % _N] = (self.mt[i % _N] + key[j % len(key)] + j) & 0xFFFFFFFF
             i += 1
@@ -106,17 +118,11 @@ class MT19937Reference:
             self._twist()
         y = self.mt[self.index]
         self.index += 1
-        # tempering
-        y ^= (y >> _SHRINK) & 0xFFFFFFFF
-        y = (y ^ ((y << 7) & 0x9D2C5680)) & 0xFFFFFFFF
-        y = (y ^ ((y << 15) & 0xEFC60000)) & 0xFFFFFFFF
-        y ^= y >> _SHIFT
-        return y & 0xFFFFFFFF
+        return temper(y)
 
     def _twist(self) -> None:
         # Reference-C update loop (split into two passes so the in-place
-        # overwrite never clobbers a word that is still needed as an input —
-        # this ordering is part of the published algorithm, not an optimisation).
+        # overwrite never clobbers a word that is still needed as input).
         for i in range(_N - _M):
             y = (self.mt[i] & _UPPER_MASK) | (self.mt[i + 1] & _LOWER_MASK)
             self.mt[i] = self.mt[i + _M] ^ (y >> 1) ^ (_MATRIX_A if (y & 1) else 0)
@@ -133,29 +139,19 @@ class MT19937Reference:
         return self.next_uint32()
 
 
-# ---------------------------------------------------------------------------
-# Published / cross-verified reference vectors (see module docstring).
-# ---------------------------------------------------------------------------
-
-#: Wikipedia/reference-C init_by_array([0,1,2,3], 4) final-state check outputs.
-ARRAY_SEED_VECTORS: dict[str, object] = {
-    "key": [0, 1, 2, 3],
-    "first_uint32": 1067595299,
-    "next_four": [955926208, 620723540, 300397926, 134363799],
-}
-
-#: Scalar-seed vectors, cross-verified against CPython's independent MT19937
-#: (random.Random().seed(s, version=2); getrandbits(32) sequence).
-SCALAR_SEED_VECTORS: dict[int, tuple[int, ...]] = {
-    0: (266217452, 2434697817, 3902257990, 3740369365, 2497862201),
-    1: (3499211812, 2785843470, 2545223596, 3242643864, 2236496687),
-    5489: (3499211812, 2785843470, 2545223596, 3242643864, 2236496687),  # NOTE: differs from 1? see below
-    12345: (4279756751, 445337078, 3728358932, 4017973973, 3439971782),
-    0xDEADBEEF: (2876402505, 2064246056, 494649323, 3068661944, 1053667889),
-    4294967295: (360872593, 3907786149, 1310812724, 1304462755, 3998725460),
-}
-
-# 5489 is CPython's default auto-seed constant; its stream equals seed(5489).
-# We keep the entry but assert it EQUALS the freshly computed stream rather
-# than trusting the transcription; tests recompute everything anyway.
-
+def load_scalar_vectors(path) -> dict[int, tuple[int, ...]]:
+    """Parse fixtures/references/mt19937_scalar_vectors.txt (# comments allowed)."""
+    from pathlib import Path
+    vecs: dict[int, tuple[int, ...]] = {}
+    text = Path(path).read_text(encoding="utf-8")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [int(x) for x in line.split()]
+        if len(parts) != 6:
+            raise ValueError(f"malformed vector line: {line!r}")
+        vecs[parts[0]] = tuple(parts[1:])
+    if not vecs:
+        raise ValueError("no vectors found")
+    return vecs

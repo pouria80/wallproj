@@ -10,9 +10,14 @@ Modelled vulnerable pattern (from upstream wasm/src/Random.cpp @69b2da98):
         std::mt19937 rng(std::random_device{}());   // fresh engine per call
         return rng();                               // first output only
     }
-Python's ``random.Random(seed)`` implements exactly the same mt19937 core, so
-``model_random32`` reproduces the C++ generator's mapping seed→output with
-bit-level fidelity (verified against Python's own MT19937 stream).
+Python's ``random.Random`` uses the same MT19937 *core*, but its seeding
+contract for a single int differs from libstdc++'s ``init_genrand`` used by the
+historical WASM build.  Therefore ``model_random32`` reproduces the vulnerable
+ARCHITECTURE (fresh engine per call, one uint32 seed, first output only) and is
+internally deterministic, but its exact seed→output mapping matches CPython's
+convention, NOT the historical binary's.  Bit-level equivalence to the
+historical build is UNVERIFIED; see docs/rng-conformance.md and
+tests/test_mt19937_conformance.py.
 """
 from __future__ import annotations
 
