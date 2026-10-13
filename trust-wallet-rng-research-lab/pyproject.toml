@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rng-research"
+version = "1.0.0"
+description = "Independent research lab for the historical Trust Wallet wallet-core WASM RNG vulnerability (CVE-2023-31290)"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []          # core tooling is stdlib-only by design
+
+[project.optional-dependencies]
+dev = ["pytest>=7,<9"]
+
+[project.scripts]
+rng-research = "rng_research.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:libtmux"
+markers = [
+  "network: tests requiring internet access to upstream sources (deselected offline)",
+]

@@ -1,0 +1,9 @@
+{
+  "origin": "Generated locally with `diff -u` from the two byte-exact upstream snapshots in fixtures/source-snapshots/. Equivalent to GitHub commit d3c2eee16b154cbb69e8959b01e5e71fbabb1212 which modified only wasm/src/Random.cpp.",
+  "upstream_commit": "d3c2eee16b154cbb69e8959b01e5e71fbabb1212",
+  "parent_commit": "69b2da9826dfdeb8116be1e5a3747b3e9418592d",
+  "files_changed_upstream": [
+    "wasm/src/Random.cpp"
+  ],
+  "sha256": "4f43739899cb03a64e6018624793f7d5763e2bfd433dddd2be97124c80f6781d"
+}

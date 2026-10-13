@@ -1,0 +1,51 @@
+{
+  "type": "run_report",
+  "generated_from": "stored run data only",
+  "run": {
+    "id": "R-f33a7334b5",
+    "experiment_id": "E1-source-snapshot-analysis",
+    "status": "completed",
+    "params": {},
+    "result": {
+      "run_id": "E1-source-snapshot-analysis-44d0c1ef",
+      "experiment_id": "E1-source-snapshot-analysis",
+      "category": "real-evidence",
+      "started_at": "2026-10-13T15:12:18Z",
+      "finished_at": "2026-10-13T15:12:18Z",
+      "tool_version": "1.0.0",
+      "python_version": "3.12.10",
+      "parameters": {},
+      "results": {
+        "vulnerable_snapshot": {
+          "path": "fixtures/source-snapshots/Random.cpp@69b2da9826df.txt",
+          "sha256": "f8dea1b9bd1e7057a0f7166ef372e3b34fc4a96eb7fa9e31bbd137beb8c5aab1",
+          "classification": "vulnerable",
+          "summary": "VULNERABLE PATTERN: every call constructs a new std::mt19937 seeded with a single 32-bit value. Effective entropy per call is bounded by the seed space (2^32 states), independent of how good the seed source appears.",
+          "findings_count": 8
+        },
+        "fixed_snapshot": {
+          "path": "fixtures/source-snapshots/Random.cpp@d3c2eee16b15.txt",
+          "sha256": "609bb7543f9d0d1200f7e62c69c428e805b5e2b4600ece2e60656216ae7f096f",
+          "classification": "fixed",
+          "summary": "FIXED PATTERN: randomness is delegated to the JS host (crypto.getRandomValues / Node crypto.randomBytes) through Emscripten EM_ASM, with a fail-closed error when no CSPRNG exists.",
+          "findings_count": 11
+        },
+        "expected_vuln_sha256": "f8dea1b9bd1e7057a0f7166ef372e3b34fc4a96eb7fa9e31bbd137beb8c5aab1",
+        "sha_matches_upstream_record": true
+      },
+      "limitations": [
+        "Static analysis of source text only; the historical WASM binary was not rebuilt.",
+        "Classification reflects the RNG layer of wallet-core's WASM port, not every code path of every extension release."
+      ],
+      "provenance_note": "Inputs are byte-exact copies fetched from trustwallet/wallet-core at commits 69b2da9826df (parent of fix) and d3c2eee16b15 (fix, release 3.1.1). See fixtures/source-snapshots/provenance.json."
+    },
+    "error": null,
+    "progress": 1.0,
+    "code_version": "dd37596",
+    "env_snapshot": {},
+    "started_at": "2026-10-13T15:12:18Z",
+    "finished_at": "2026-10-13T15:12:18Z",
+    "created_at": "2026-10-13T15:12:18Z"
+  },
+  "linked_findings": []
+}

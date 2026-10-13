@@ -1,0 +1,30 @@
+{
+  "note": "These files were fetched verbatim from the official trustwallet/wallet-core repository via raw.githubusercontent.com on 2026-10-12. The '@sha' suffix records the exact git commit each snapshot corresponds to. Text copies (.txt) are used because the project is Python-only; content is byte-identical to upstream.",
+  "snapshots": [
+    {
+      "local_file": "Random.cpp@69b2da9826df.txt",
+      "upstream_repo": "trustwallet/wallet-core",
+      "upstream_path": "wasm/src/Random.cpp",
+      "commit_sha": "69b2da9826dfdeb8116be1e5a3747b3e9418592d",
+      "commit_role": "parent of fix commit (last vulnerable state)",
+      "release_tag_containing_commit_as_tip": "3.1.0 (efca5eeef5ab... tag object; Random.cpp identical since 5b8beb939d08 added it on 2022-05-24)",
+      "fetch_url": "https://raw.githubusercontent.com/trustwallet/wallet-core/69b2da9826dfdeb8116be1e5a3747b3e9418592d/wasm/src/Random.cpp",
+      "role": "vulnerable",
+      "license": "MIT (Trust Wallet)",
+      "sha256": "f8dea1b9bd1e7057a0f7166ef372e3b34fc4a96eb7fa9e31bbd137beb8c5aab1",
+      "size_bytes": 656
+    },
+    {
+      "local_file": "Random.cpp@d3c2eee16b15.txt",
+      "upstream_repo": "trustwallet/wallet-core",
+      "upstream_path": "wasm/src/Random.cpp",
+      "commit_sha": "d3c2eee16b154cbb69e8959b01e5e71fbabb1212",
+      "commit_role": "fix commit '[emscripten]: use javascript for random generation (#2750)', 2022-11-21, tagged as release 3.1.1",
+      "fetch_url": "https://raw.githubusercontent.com/trustwallet/wallet-core/d3c2eee16b154cbb69e8959b01e5e71fbabb1212/wasm/src/Random.cpp",
+      "role": "fixed",
+      "license": "MIT (Trust Wallet)",
+      "sha256": "609bb7543f9d0d1200f7e62c69c428e805b5e2b4600ece2e60656216ae7f096f",
+      "size_bytes": 2447
+    }
+  ]
+}

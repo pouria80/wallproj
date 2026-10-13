@@ -1,0 +1,142 @@
+{
+  "type": "lab_summary",
+  "generated_at_utc": "2026-10-13T15:12:18Z",
+  "overview": {
+    "backend": "ok",
+    "version": "0.1.0",
+    "python": {
+      "ok": true,
+      "version": "3.12.10",
+      "implementation": "CPython",
+      "required_min": "3.10"
+    },
+    "os": null,
+    "node": {
+      "ok": true,
+      "path": "/usr/bin/node",
+      "version": "v20.20.2"
+    },
+    "experiments_defined": 1,
+    "core_experiments_available": 5,
+    "runs_total": 1,
+    "runs_by_status": {
+      "completed": 1
+    },
+    "samples": 1,
+    "findings": 1,
+    "evidence_records": 13,
+    "snapshot_integrity": {
+      "ok": true,
+      "details": [
+        {
+          "file": "Random.cpp@69b2da9826df.txt",
+          "expected_sha256": "f8dea1b9bd1e7057a0f7166ef372e3b34fc4a96eb7fa9e31bbd137beb8c5aab1",
+          "actual_sha256": "f8dea1b9bd1e7057a0f7166ef372e3b34fc4a96eb7fa9e31bbd137beb8c5aab1",
+          "exists": true,
+          "match": true
+        },
+        {
+          "file": "Random.cpp@d3c2eee16b15.txt",
+          "expected_sha256": "609bb7543f9d0d1200f7e62c69c428e805b5e2b4600ece2e60656216ae7f096f",
+          "actual_sha256": "609bb7543f9d0d1200f7e62c69c428e805b5e2b4600ece2e60656216ae7f096f",
+          "exists": true,
+          "match": true
+        }
+      ]
+    },
+    "recent_events": [
+      {
+        "id": 2,
+        "ts": "2026-10-13T15:12:18Z",
+        "level": "info",
+        "run_id": "R-f33a7334b5",
+        "message": "run R-f33a7334b5 completed (E1-source-snapshot-analysis)"
+      },
+      {
+        "id": 1,
+        "ts": "2026-10-13T15:12:18Z",
+        "level": "info",
+        "run_id": "R-f33a7334b5",
+        "message": "run R-f33a7334b5 queued for experiment E1-source-snapshot-analysis"
+      }
+    ],
+    "last_test_run": null,
+    "not_implemented": [
+      "WASM historical artefact reconstruction (out of scope; see docs/limitations.md)"
+    ]
+  },
+  "runs": [
+    {
+      "id": "R-f33a7334b5",
+      "experiment_id": "E1-source-snapshot-analysis",
+      "status": "completed",
+      "params": {},
+      "result": {
+        "run_id": "E1-source-snapshot-analysis-44d0c1ef",
+        "experiment_id": "E1-source-snapshot-analysis",
+        "category": "real-evidence",
+        "started_at": "2026-10-13T15:12:18Z",
+        "finished_at": "2026-10-13T15:12:18Z",
+        "tool_version": "1.0.0",
+        "python_version": "3.12.10",
+        "parameters": {},
+        "results": {
+          "vulnerable_snapshot": {
+            "path": "fixtures/source-snapshots/Random.cpp@69b2da9826df.txt",
+            "sha256": "f8dea1b9bd1e7057a0f7166ef372e3b34fc4a96eb7fa9e31bbd137beb8c5aab1",
+            "classification": "vulnerable",
+            "summary": "VULNERABLE PATTERN: every call constructs a new std::mt19937 seeded with a single 32-bit value. Effective entropy per call is bounded by the seed space (2^32 states), independent of how good the seed source appears.",
+            "findings_count": 8
+          },
+          "fixed_snapshot": {
+            "path": "fixtures/source-snapshots/Random.cpp@d3c2eee16b15.txt",
+            "sha256": "609bb7543f9d0d1200f7e62c69c428e805b5e2b4600ece2e60656216ae7f096f",
+            "classification": "fixed",
+            "summary": "FIXED PATTERN: randomness is delegated to the JS host (crypto.getRandomValues / Node crypto.randomBytes) through Emscripten EM_ASM, with a fail-closed error when no CSPRNG exists.",
+            "findings_count": 11
+          },
+          "expected_vuln_sha256": "f8dea1b9bd1e7057a0f7166ef372e3b34fc4a96eb7fa9e31bbd137beb8c5aab1",
+          "sha_matches_upstream_record": true
+        },
+        "limitations": [
+          "Static analysis of source text only; the historical WASM binary was not rebuilt.",
+          "Classification reflects the RNG layer of wallet-core's WASM port, not every code path of every extension release."
+        ],
+        "provenance_note": "Inputs are byte-exact copies fetched from trustwallet/wallet-core at commits 69b2da9826df (parent of fix) and d3c2eee16b15 (fix, release 3.1.1). See fixtures/source-snapshots/provenance.json."
+      },
+      "error": null,
+      "progress": 1.0,
+      "code_version": "dd37596",
+      "env_snapshot": "{}",
+      "started_at": "2026-10-13T15:12:18Z",
+      "finished_at": "2026-10-13T15:12:18Z",
+      "created_at": "2026-10-13T15:12:18Z"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-59aa3bcf",
+      "title": "observed determinism",
+      "description": "",
+      "module": "",
+      "status": "new",
+      "confidence": "unspecified",
+      "severity": "unspecified",
+      "reproduction": "",
+      "limitations": "",
+      "linked_runs": [],
+      "linked_evidence": [
+        0
+      ],
+      "notes": "",
+      "created_at": "2026-10-13T15:12:18Z",
+      "history": [
+        {
+          "ts": "2026-10-13T15:12:18Z",
+          "status": "new",
+          "note": "created"
+        }
+      ]
+    }
+  ]
+}
