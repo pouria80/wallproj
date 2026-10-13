@@ -155,6 +155,13 @@ def _groups_by_class(m: int, k: int, counts: list[int], seed: int):
 
 
 def _to_payload(groups) -> list[int]:
+    """Pack m-nibble groups into bytes so poker_test re-extracts them exactly.
+
+    poker_test appends, per byte, the LOW nibble first and the HIGH nibble
+    second (byte & 0xF, then byte >> 4), i.e. it reads nibbles in stream
+    order.  Therefore consecutive pairs of the group must be packed as
+    (even_index | odd_index << 4); no reversal is required anywhere else.
+    """
     payload: list[int] = []
     for g in groups:
         for a, b in zip(g[0::2], g[1::2]):
@@ -191,39 +198,34 @@ def test_poker_df_reflects_m_in_threshold_note():
     """df advertised in the result must track m, not the alphabet size k.
 
     Uses m = 4 with n = 16**4 groups.  The class counts are the exact
-    integers E_j = S(4,j)*(16)_j * 16**(4-4) = {16, 1680, 20160, 43680}
+    integers E_j = S(4,j)*(16)_j = {16, 1680, 20160, 43680}
     (sum = 65536 = 16**4), so a stream whose class histogram matches them
     forces stat == 0 mathematically under the df = m-1 = 3 model — the old
     k-1 code would have reported df = 15 in threshold_note.
 
-    Note on construction: poker_test extracts nibbles from bytes in *low
-    first* order (byte & 0xF, then byte >> 4), while _to_payload packs the
-    tuple as (g[0] << 4 | g[1]).  To keep every group's class invariant we
-    reverse each tuple before packing — reversing does not change the number
-    of distinct values in a group.  Every distinct tuple is used exactly
-    once (counts[j] == number of tuples of class j for m=k=4), so no
-    rejection sampling or pool exhaustion occurs.
+    Construction note: for m = 4, k = 16 every expected class count equals
+    the number of *distinct* tuples of that class, so each distinct tuple
+    is used exactly once (no rejection sampling, no pool exhaustion).
+    _to_payload packs nibbles in stream order, which poker_test re-extracts
+    unchanged, so each group's class is preserved bit-for-bit.
     """
-    def _groups_exact(m: int, k: int, counts: list[int], seed: int):
+    def _groups_exact(m: int, k: int, counts: list[int]):
         """Exhaustively enumerate ALL k**m tuples of a given class."""
-        rng = random.Random(seed)
         all_tuples = [tuple(t) for t in product(range(k), repeat=m)]
-        rng.shuffle(all_tuples)
         groups: list[tuple[int, ...]] = []
         for j in range(1, m + 1):
             pool = [t for t in all_tuples if len(set(t)) == j]
-            assert len(pool) >= counts[j], (
-                f"class {j} needs {counts[j]} groups but only {len(pool)} "
-                "distinct tuples exist; pick smaller expected counts")
-            groups.extend(pool[:counts[j]])
+            assert len(pool) == counts[j], (
+                f"class {j}: expected {counts[j]} groups but {len(pool)} "
+                "distinct tuples exist; pick feasible expected counts")
+            groups.extend(pool)
         return groups
 
     # Exact H0 expectation for m=4, k=16: P(j)=S(4,j)(16)_j/16^4 => E_j =
     # S(4,j)*(16)_j, all integers and all <= available distinct tuples.
     counts = [0, 16, 1680, 20160, 43680]
     assert sum(counts) == 16 ** 4
-    groups = [tuple(reversed(g)) for g in _groups_exact(4, 16, counts, seed=7)]
-    payload = _to_payload(groups)
+    payload = _to_payload(_groups_exact(4, 16, counts))
     assert len(payload) == 2 * sum(counts[1:])  # 4 nibbles packed per 2 bytes
     r = poker_test(payload, m=4)
     assert "df=3" in r.threshold_note
