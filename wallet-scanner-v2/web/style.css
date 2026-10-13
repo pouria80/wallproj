@@ -43,3 +43,9 @@ details summary { cursor: pointer; color: #9fb0d0; font-size: 14px; margin-top: 
 
 #log { list-style: none; max-height: 180px; overflow: auto; font-size: 12px; color: #9fb0d0; }
 #log li { padding: 3px 0; border-bottom: 1px dashed #1d2942; }
+
+/* V2 additions */
+.connerr { background: #b91c1c; color: #fff; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; }
+.dl { float: left; font-size: 13px; color: #4ade80; text-decoration: none; border: 1px solid #4ade80; padding: 4px 10px; border-radius: 6px; }
+.dl:hover { background: #4ade8022; }
+.amt.usd { color: #38bdf8; }
