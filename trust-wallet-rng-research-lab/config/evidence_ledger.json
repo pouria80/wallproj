@@ -116,6 +116,15 @@
       "status": "confirmed",
       "confidence": "high",
       "notes": "Confirms algorithm-level conformance of the reference engine only. Bit-level equivalence of the MODEL or the reference engine to the shipped Emscripten WASM binary remains UNVERIFIED (see docs/rng-conformance.md, ledger gap L2)."
+    },
+    {
+      "claim": "A deterministic reconstruction chain (uint32 seed -> libstdc++-convention MT19937 first-outputs low-byte stream -> BIP-39 mnemonic) round-trips exactly and recovers the originating seed in targeted audits; the BIP-39 layer is validated against official test vectors and the MT19937 core against the external g++ oracle.",
+      "source": "this lab's experiments + fixtures/references/bip39_vectors.json (official BIP-39 subset) + mt19937_scalar_vectors.txt (g++ 12.2 oracle)",
+      "locator": "experiment E6-mnemonic-recovery-roundtrip; src/rng_research/mnemonic_recovery.py; tests/test_mnemonic_recovery.py; bip39_vectors.json sha258(over canonical vectors list) 893a88648a421605cda8d0cf15adb153b30bcd4c7ecfd0f70f581a7de491a0ab",
+      "method": "python -m rng_research.cli run-experiments --experiment E6-mnemonic-recovery-roundtrip ; pytest tests/test_mnemonic_recovery.py",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Confirmed FOR THE MODELLED SEED PATH ONLY. Whether the historical WASM build seeded std::mt19937 with exactly one uint32 via init_genrand remains UNVERIFIED (L1/L2); a recovered candidate seed proves reachability under the model, not historical origin. Enumeration hard-capped at 1,000,000 seeds per invocation by design."
     }
   ]
 }

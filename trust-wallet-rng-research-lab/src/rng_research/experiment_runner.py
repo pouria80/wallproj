@@ -213,6 +213,73 @@ def exp_node_bridge(params: dict[str, Any]) -> tuple[dict[str, Any], list[str], 
     return results, limitations, prov
 
 
+UINT32_MASK = 2**32 - 1
+
+
+def exp_mnemonic_recovery_roundtrip(params: dict[str, Any]) -> tuple[dict[str, Any], list[str], str]:
+    """Bit-accurate seed→random_buffer→BIP-39 reconstruction round-trip.
+
+    Uses the oracle-VERIFIED libstdc++ MT19937 stream (not CPython seeding)
+    plus a BIP-39 provider that is itself validated against official vectors.
+    Synthetic seeds only; targeted audit over a small declared seed set.
+    """
+    from . import mnemonic_recovery as mr
+
+    n_seeds = int(params.get("seeds", 8))
+    if not (1 <= n_seeds <= 256):
+        raise ExperimentError("seeds must be within 1..256")
+    entropy_len = int(params.get("entropy_len", 16))
+    prov = mr.get_provider()
+    if not prov.vectors_verified:
+        raise ExperimentError("BIP-39 provider failed official-vector self-check")
+
+    # Deterministic synthetic seed set (no OS randomness needed → reproducible)
+    base_raw = params.get("base_seed", 0x5EED0000)
+    base = int(base_raw, 0) if isinstance(base_raw, str) else int(base_raw)
+    base &= UINT32_MASK
+    seeds = [(base + i) for i in range(n_seeds)]
+
+    roundtrip_ok = True
+    audits_ok = True
+    samples = []
+    for s in seeds[:4]:
+        buf = mr.vulnerable_random_buffer(s, entropy_len)
+        mnem = prov.to_mnemonic(buf)
+        back = prov.to_entropy(mnem)
+        roundtrip_ok &= (back == buf)
+        rep = mr.recover_seeds_for_mnemonic(mnem, known_seeds=seeds)
+        audits_ok &= any(m["seed"] == s for m in rep["matches"])
+        samples.append({"seed": s, "entropy_hex": buf.hex(), "mnemonic": mnem})
+
+    # Cross-check: verified libstdc++ stream differs from CPython-convention model
+    from .secure_rng import model_random_buffer_seeded
+    divergence = [s for s in seeds[:4]
+                  if model_random_buffer_seeded(s, entropy_len)
+                  != mr.vulnerable_random_buffer(s, entropy_len)]
+
+    results = {
+        "provider": prov.name,
+        "provider_version": prov.version,
+        "official_vectors_verified": prov.vectors_verified,
+        "mt_core": "MT19937Reference (libstdc++ init_genrand convention, oracle-verified)",
+        "seeds_tested": n_seeds,
+        "roundtrip_all_ok": roundtrip_ok,
+        "targeted_audit_all_ok": audits_ok,
+        "cpython_model_divergent_seeds": len(divergence),
+        "sample_reconstructions": samples,
+        "scope_cap_seeds": mr.MAX_ENUMERATION_SEEDS,
+    }
+    limitations = [
+        "Reconstruction is exact for the MODELLED seed path (one uint32 into "
+        "init_genrand); historical WASM binary equivalence remains UNVERIFIED (L1/L2).",
+        "Synthetic seeds only — no real wallets involved.",
+        "Enumeration is hard-capped; this experiment never sweeps key spaces.",
+    ]
+    prov_note = ("Chain: fixtures/references/mt19937_scalar_vectors.txt (g++ 12.2 oracle) "
+                 "+ fixtures/references/bip39_vectors.json (official BIP-39 subset).")
+    return results, limitations, prov_note
+
+
 # ---------------------------------------------------------------------------
 # Registry / execution
 # ---------------------------------------------------------------------------
@@ -237,6 +304,11 @@ _EXPERIMENTS: dict[str, dict[str, Any]] = {
     "E5-node-bridge-check": {
         "category": "security-fix", "fn": exp_node_bridge,
         "description": "Runs the patched JS RNG logic under Node.js (optional; needs node)",
+    },
+    "E6-mnemonic-recovery-roundtrip": {
+        "category": "modelling", "fn": exp_mnemonic_recovery_roundtrip,
+        "description": "Bit-accurate seed→random_buffer→BIP-39 reconstruction round-trip "
+                       "(oracle-verified MT19937 core + official-vector-checked BIP-39 provider)",
     },
 }
 

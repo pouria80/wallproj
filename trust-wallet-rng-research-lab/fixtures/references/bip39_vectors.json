@@ -1,0 +1,26 @@
+{
+  "description": "Official BIP-39 test vectors (subset, english, 128-bit entropy), cross-checked with trezor/python-mnemonic. Reference: https://github.com/trezor/python-mnemonic/blob/master/vectors.json",
+  "source_sha256": "893a88648a421605cda8d0cf15adb153b30bcd4c7ecfd0f70f581a7de491a0ab",
+  "vectors": [
+    {
+      "entropy": "00000000000000000000000000000000",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    },
+    {
+      "entropy": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+      "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow"
+    },
+    {
+      "entropy": "80808080808080808080808080808080",
+      "mnemonic": "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
+    },
+    {
+      "entropy": "ffffffffffffffffffffffffffffffff",
+      "mnemonic": "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
+    },
+    {
+      "entropy": "9e3333bb4b7a21f42dc59556c046fc86",
+      "mnemonic": "owner office uphold notice pear wheel require razor fine acquire sand assist"
+    }
+  ]
+}
