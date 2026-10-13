@@ -107,6 +107,15 @@
       "status": "partially_confirmed",
       "confidence": "medium",
       "notes": "Per-wallet status cannot be determined offline; this is guidance, not a claim we can test."
+    },
+    {
+      "claim": "An independent from-scratch MT19937 implementation (init_genrand scalar seeding + twist + tempering) reproduces libstdc++ std::mt19937 output streams bit-for-bit for six uint32 seeds; CPython's seed(int, version=2) contract yields different streams for the same seeds. The lab's Python model is therefore architecture-faithful but NOT proven bit-equivalent to the historical WASM build.",
+      "source": "external oracle: libstdc++ via g++ 12.2.0 (Debian); fetched random.tcc from gcc-mirror tag releases/gcc-13.2.0",
+      "locator": "fixtures/references/mt19937_scalar_vectors.txt (sha256 2d982db9...), gen_mt.cpp (sha256 24890226...), tests/test_mt19937_conformance.py",
+      "method": "Oracle program compiled and executed locally on 2026-10-13 (Linux/x86_64); outputs recorded with hashes; Python reference engine compared stream-by-stream; difference vs CPython asserted as a regression-guarded test",
+      "status": "confirmed",
+      "confidence": "high",
+      "notes": "Confirms algorithm-level conformance of the reference engine only. Bit-level equivalence of the MODEL or the reference engine to the shipped Emscripten WASM binary remains UNVERIFIED (see docs/rng-conformance.md, ledger gap L2)."
     }
   ]
 }

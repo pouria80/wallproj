@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 import pytest
 from rng_research.experiment_runner import (run_experiment, run_suite,
@@ -64,16 +65,37 @@ def test_run_suite_writes_artifacts(tmp_path):
     loaded = json.loads(files[0].read_text())
     assert "run_id" in loaded and "results" in loaded
 
-def test_run_suite_records_skip_reason(tmp_path):
+def test_run_suite_records_skip_reason(tmp_path, monkeypatch):
+    """Platform-independent: production code resolves node via shutil.which.
+
+    Case 1 (node unavailable): PATH is emptied so shutil.which("node")
+    returns None on every OS -> the run must be recorded as skipped with a
+    human-readable reason.  Case 2 (node available) is covered by
+    test_run_suite_node_available_when_present below.
+    """
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps({"experiments": {
+        "E5-node-bridge-check": {"enabled": True, "params": {"out": str(tmp_path/"x.js")}}}}))
+    # Empty PATH -> shutil.which("node") finds nothing on Windows/Linux/macOS.
+    monkeypatch.setenv("PATH", str(tmp_path))
+    runs = run_suite(cfg, tmp_path / "art")
+    r = runs[0]
+    assert r.results.get("skipped") is True
+    reason = r.results.get("reason", "")
+    assert "node" in reason.lower()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node executable not present")
+def test_run_suite_node_available_when_present(tmp_path):
+    """When node IS resolvable via shutil.which, E5 must actually run the
+    bridge (no skip).  Skipped automatically on machines without Node."""
     cfg = tmp_path / "cfg.json"
     cfg.write_text(json.dumps({"experiments": {
         "E5-node-bridge-check": {"enabled": True, "params": {"out": str(tmp_path/"x.js")}}}}))
     runs = run_suite(cfg, tmp_path / "art")
     r = runs[0]
-    if not Path("/usr/bin/node").exists() and not Path(r"/usr/local/bin/node").exists():
-        assert r.results.get("skipped") is True
-    else:
-        assert r.results.get("bridge_ran") is True or r.results.get("skipped")
+    assert r.results.get("skipped") is not True
+    assert r.results.get("bridge_ran") is True
 
 def test_run_suite_missing_config(tmp_path):
     with pytest.raises(ExperimentError):
