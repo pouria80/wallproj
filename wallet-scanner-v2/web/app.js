@@ -12,14 +12,18 @@ $("btn-start").onclick = () => post("/api/start", {
   batch_size: Math.max(1, +$("batch").value || 50),
   interval_sec: Math.max(0.1, parseFloat($("interval").value) || 1),
   threshold_eth: parseFloat($("threshold").value) || 0,
+  threshold_usdt: parseFloat($("threshold-usdt").value) || 0,
 });
 
 $("btn-stop").onclick = () => post("/api/stop");
 $("btn-reset").onclick = async () => { await post("/api/reset"); render(await getStatus()); };
 
 async function getStatus() {
-  try { return await (await fetch("/api/status")).json(); }
-  catch { return null; }
+  try {
+    const r = await fetch("/api/status");
+    if (!r.ok) throw new Error("bad status " + r.status);
+    return await r.json();
+  } catch { return null; }
 }
 
 function fmt(n) { return n.toLocaleString("en-US"); }
@@ -27,6 +31,7 @@ function fmt(n) { return n.toLocaleString("en-US"); }
 let lastHitCount = -1;
 
 function render(s) {
+  $("conn-error").style.display = s ? "none" : "block";
   if (!s) return;
   const badge = $("state-badge");
   badge.textContent = s.running ? "در حال پیمایش…" : (s.elapsed_sec > 0 ? "متوقف" : "آماده به کار");
@@ -40,6 +45,7 @@ function render(s) {
   $("st-funded").textContent = fmt(s.funded_count);
   $("st-time").textContent = s.elapsed_sec + "s";
   $("st-errors").textContent = fmt(s.errors);
+  $("st-pending").textContent = fmt(s.pending_checks ?? 0);
 
   if (s.funded_count !== lastHitCount) {
     lastHitCount = s.funded_count;
@@ -48,6 +54,8 @@ function render(s) {
       <div class="hit">
         <div class="hit-head">
           <span class="amt">${h.eth.toFixed(6)} ETH</span>
+          <span class="amt usd">${(h.usdt ?? 0).toFixed(2)} USDT</span>
+          <span class="amt usd">${(h.usdc ?? 0).toFixed(2)} USDC</span>
           <span class="seed">seed: ${fmt(h.seed)}</span>
           <span class="time">${h.found_at}</span>
         </div>

@@ -35,6 +35,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         if self.path.startswith("/api/status"):
             self._send(200, json.dumps(scanner.status()).encode(), "application/json")
+        elif self.path.startswith("/api/download"):
+            from scanner import HITS_FILE
+            if HITS_FILE.exists() and HITS_FILE.stat().st_size > 0:
+                self.send_response(200)
+                self.send_header("content-type", "text/plain; charset=utf-8")
+                self.send_header("content-disposition",
+                                 'attachment; filename="funded_wallets.txt"')
+                self.send_header("content-length",
+                                 str(HITS_FILE.stat().st_size))
+                self.end_headers()
+                self.wfile.write(HITS_FILE.read_bytes())
+            else:
+                self._send(404, b"no funded wallets yet", "text/plain")
         elif self.path in ("/", "/index.html"):
             self._serve_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
         elif self.path == "/app.js":
