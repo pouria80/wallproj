@@ -27,44 +27,64 @@ def inv_mod(a: int, m: int = _P) -> int:
     return pow(a % m, -1, m)
 
 
-def _jdouble(P):
-    X, Y, Z = P
+def _jdouble(P_):
+    """Jacobian doubling, standard formula for a = 0 (secp256k1).
+
+    Reference (Hal Finney / djb-style derivation, affine slope λ = 3X²/2YZ... ):
+        YY = Y²;  S = 4·X·YY
+        M  = 3·X² + a·Z⁴   →   3·X²          (a = 0)
+        X' = M² − 2S
+        Y' = M·(S − X') − 8·YY²
+        Z' = 2·Y·Z
+    NOTE: this is the NON-halves variant where M carries no Z² factor because
+    we work with (X,Y,Z) such that affine = (X/Z², Y/Z³); consistency was
+    verified against an independent affine oracle (tests/test_correctness.py T5).
+    An earlier draft mixed s = 4·X²·Y² or m = 3·X⁴ variants and produced wrong
+    points for every k ≥ 2 — caught by conformance testing, never shipped.
+    """
+    X, Y, Z = P_
     if Y == 0 or Z == 0:
         return (0, 0, 0)                      # point at infinity
-    xx = (X * X) % _P
     yy = (Y * Y) % _P
     yyyy = (yy * yy) % _P
-    zz = (Z * Z) % _P
-    s = (4 * xx * yy) % _P
-    m = (3 * xx) % _P                         # secp256k1: a = 0
+    s = (4 * X * yy) % _P
+    m = (3 * X * X) % _P                      # a = 0
     x2 = (m * m - 2 * s) % _P
     y2 = (m * (s - x2) - 8 * yyyy) % _P
     z2 = (2 * Y * Z) % _P
     return (x2, y2, z2)
 
 
-def _jadd(P, Q):
-    """Jacobian + Jacobian (general case; doubling handled by _jdouble)."""
-    X1, Y1, Z1 = P
-    X2, Y2, Z2 = Q
+def _jadd(P_, Q_):
+    """Jacobian + Jacobian, general case (a = 0).
+
+    The classic hkc/`i,j,v` formulation is ASYMMETRIC: it assumes Z2 == 1.
+    Used inside the double-and-add ladder with a projective `addend` (Z2 != 1)
+    it silently returned wrong points for every k with ≥2 set bits — caught by
+    the independent affine oracle in tests/test_correctness.py (T5). The fully
+    symmetric version below is correct for arbitrary Z1, Z2.
+    """
+    X1, Y1, Z1 = P_
+    X2, Y2, Z2 = Q_
     if Z1 == 0:
-        return Q
+        return Q_
     if Z2 == 0:
-        return P
+        return P_
     z1z1 = (Z1 * Z1) % _P
+    z2z2 = (Z2 * Z2) % _P
+    u1 = (X1 * z2z2) % _P
     u2 = (X2 * z1z1) % _P
+    s1 = (Y1 * Z2 % _P * z2z2) % _P
     s2 = (Y2 * Z1 % _P * z1z1) % _P
-    h = (u2 - X1) % _P
-    rr = (s2 - Y1) % _P
+    h = (u2 - u1) % _P
+    r = (s2 - s1) % _P
     if h == 0:
-        return _jdouble(Q) if rr == 0 else (0, 0, 0)   # equal / inverse points
-    i = (4 * h * h) % _P
-    j = (h * i) % _P
-    r2 = (rr + rr) % _P
-    v = (X1 * i) % _P
-    x3 = (r2 * r2 - j - 2 * v) % _P
-    y3 = (r2 * (v - x3) - 2 * Y1 * j) % _P
-    z3 = ((Z1 + Z2) * (Z1 + Z2) % _P - z1z1 - Z2 * Z2) % _P * h % _P
+        return _jdouble(Q_) if r == 0 else (0, 0, 0)   # equal / inverse points
+    hh = (h * h) % _P
+    hhh = (h * hh) % _P
+    x3 = (r * r - hhh - 2 * u1 * hh) % _P
+    y3 = (r * (u1 * hh - x3) - s1 * hhh) % _P
+    z3 = (Z1 * Z2 % _P * h) % _P
     return (x3, y3, z3)
 
 
