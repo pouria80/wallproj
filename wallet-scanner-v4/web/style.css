@@ -1,0 +1,60 @@
+:root{
+  --bg:#0d1117; --card:#161b22; --line:#30363d; --txt:#e6edf3; --dim:#8b949e;
+  --acc:#2f81f7; --go:#238636; --warn:#9e6a03; --danger:#da3633; --bar:#1f6feb;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);
+  font-family:Vazirmatn,Tahoma,"Segoe UI",sans-serif;}
+header{padding:18px 24px;border-bottom:1px solid var(--line);background:#0a0e14}
+h1{margin:0;font-size:1.5rem}
+h2{margin:0 0 12px;font-size:1.05rem;color:var(--acc)}
+.badge{font-size:.7rem;background:#1b2a4a;color:#79c0ff;border:1px solid #24418a;
+  border-radius:999px;padding:2px 10px;vertical-align:middle}
+.sub{margin:6px 0 0;color:var(--dim);font-size:.85rem}
+main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px;max-width:1280px;margin:auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.wide{grid-column:1 / -1}
+.row.between{display:flex;justify-content:space-between;align-items:center}
+.pill{border-radius:999px;padding:3px 14px;font-size:.8rem;border:1px solid}
+.pill.idle{color:var(--dim);border-color:var(--line)}
+.pill.run{color:#3fb950;border-color:#238636;background:#0f2116}
+.pill.pause{color:#d29922;border-color:#9e6a03;background:#271d05}
+.pill.done{color:#79c0ff;border-color:#24418a;background:#0d1e33}
+.bar-wrap{position:relative;height:26px;background:#0a0e14;border:1px solid var(--line);
+  border-radius:8px;overflow:hidden;margin:12px 0}
+.bar{height:100%;width:0%;background:linear-gradient(90deg,#1f6feb,#3fb950);transition:width .6s}
+.bar-label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-size:.8rem;font-weight:bold;text-shadow:0 1px 2px #000}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+.stats div{background:#0a0e14;border:1px solid var(--line);border-radius:8px;padding:8px}
+.stats label{display:block;font-size:.7rem;color:var(--dim);margin-bottom:2px}
+.stats b{font-size:.95rem;word-break:break-all}
+#rate-chart{width:100%;background:#0a0e14;border:1px solid var(--line);border-radius:8px}
+.errline{color:#f85149;font-size:.78rem;margin-top:6px;min-height:1em}
+.form{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.form div{display:flex;flex-direction:column;gap:4px}
+.form label{font-size:.75rem;color:var(--dim)}
+.form input[type=number]{background:#0a0e14;border:1px solid var(--line);color:var(--txt);
+  border-radius:6px;padding:7px;font-family:inherit}
+.form .check{grid-column:1/-1;flex-direction:row}
+.form .check label{font-size:.78rem;color:var(--txt)}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+button,.dl{cursor:pointer;border:1px solid var(--line);border-radius:8px;padding:8px 14px;
+  font-family:inherit;font-size:.85rem;color:#fff;text-decoration:none;background:#21262d}
+.go{background:var(--go)!important;border-color:var(--go)!important}
+.warn{background:var(--warn)!important;border-color:var(--warn)!important}
+.danger{background:var(--danger)!important;border-color:var(--danger)!important}
+.hint{color:var(--dim);font-size:.75rem;margin:10px 0 0}
+.count{background:#1b2a4a;color:#79c0ff;border-radius:999px;padding:1px 10px;font-size:.75rem}
+.table-wrap{overflow-x:auto;max-height:320px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:.78rem}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:right;white-space:nowrap}
+th{color:var(--dim);position:sticky;top:0;background:var(--card)}
+td.mn{direction:ltr;text-align:left;font-size:.7rem;color:var(--dim);max-width:260px;
+  overflow:hidden;text-overflow:ellipsis}
+td.ltr{direction:ltr;text-align:left}
+.muted{color:var(--dim);font-size:.8rem}
+#logs{background:#0a0e14;border:1px solid var(--line);border-radius:8px;padding:10px;
+  height:180px;overflow-y:auto;font-size:.75rem;line-height:1.7;margin:0;white-space:pre-wrap}
+footer{padding:14px 24px;border-top:1px solid var(--line);color:var(--dim);font-size:.72rem;text-align:center}
+@media(max-width:900px){main{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}}

