@@ -37,7 +37,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # --------------------------------------------------------------------- T1
 def t1_reference_vs_oracle() -> None:
-    from mt19937 import MT19937Reference
+    from mt19937 import RefMT19937
     vec_file = ROOT / "tests" / "mt19937_scalar_vectors.txt"
     n = 0
     for line in vec_file.read_text().splitlines():
@@ -45,10 +45,9 @@ def t1_reference_vs_oracle() -> None:
             continue
         parts = [int(x) for x in line.split()]
         seed, outs = parts[0], parts[1:]
-        e = MT19937Reference()
-        e.seed_scalar(seed)
-        got = [e.next_uint32() for _ in range(len(outs))]
-        check(f"T1 oracle seed={seed}", got == outs, f"{got} != {outs}")
+        e = RefMT19937(seed)
+        got = [e.genrand_uint32() for _ in range(len(outs))]
+        check(f"T1 oracle seed={seed}", got == outs, f"{got[:3]}... != {outs[:3]}...")
         n += 1
     check("T1 vector count >= 6", n >= 6, f"only {n} vectors")
 
@@ -56,12 +55,14 @@ def t1_reference_vs_oracle() -> None:
 # --------------------------------------------------------------------- T2
 def t2_fast_mt_exactness() -> None:
     from fast_mt import BatchMT
-    from mt19937 import MT19937Reference
+    from mt19937 import RefMT19937
 
     def ref_buffer(seed: int, length: int = 16) -> bytes:
-        e = MT19937Reference()
-        e.seed_scalar(seed & 0xFFFFFFFF)
-        return bytes(e.next_uint32() & 0xFF for _ in range(length))
+        # Vulnerable wallet-core model (Random.cpp@69b2da98): random_buffer()
+        # called rng() once PER BYTE and stored a uint8 — the LOW BYTE of each
+        # successive tempering output. NOT little-endian uint32 packing.
+        e = RefMT19937(seed & 0xFFFFFFFF)
+        return bytes(e.genrand_uint32() & 0xFF for _ in range(length))
 
     boundary = [0, 1, 2, 5489, 12345, 0x7FFFFFFF, 0x80000000,
                 0xDEADBEEF, 0xFFFFFFFE, 0xFFFFFFFF]
@@ -87,6 +88,12 @@ def t2_fast_mt_exactness() -> None:
           f"diff={sorted(fast_hits ^ slow_hits)[:5]}")
     rate = len(fast_hits) / (hi - lo + 1)
     check("T2 pass-rate ~1/16", 0.04 < rate < 0.09, f"rate={rate:.4f}")
+
+    # cross-check against the pipeline's own reference buffer function
+    from wallet_model import vulnerable_random_buffer
+    ok = all(BatchMT(s, s).buffers()[0] == vulnerable_random_buffer(s)
+             for s in boundary + rnd_seeds[:10])
+    check("T2 buffers == wallet_model.vulnerable_random_buffer", ok)
 
 
 # --------------------------------------------------------------------- T3
@@ -132,19 +139,45 @@ def t3_bip39() -> None:
 def t4_keccak() -> None:
     from ecc import keccak256
 
+    # Known-answer vectors cross-checked against an independent implementation
+    # (pycryptodome Keccak digest_bits=256) — these are the TRUE values.
     k_empty = keccak256(b"").hex()
     check("T4 keccak256('')",
           k_empty == "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
           k_empty)
     k_abc = keccak256(b"abc").hex()
     check("T4 keccak256('abc')",
-          k_abc == "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44ef5efa5ebb67",
+          k_abc == "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
           k_abc)
     # long input spanning multiple 136-byte rate blocks
     k_long = keccak256(b"a" * 300).hex()
     check("T4 keccak256(300*'a') multi-block",
-          k_long == "ec68bcd24eb9ac96dd8617cba3104d0a21e9f1fe1f0da1f7a631d629e374a975",
+          k_long == "5b7e0e47a96f32a88b4f14ca177982790807c40e1a105742ba0fc1babe1ef826",
           k_long)
+    # exact rate boundary cases (padding must spill into a fresh block at 135/136)
+    k_r135 = keccak256(b"\xff" * 135).hex()
+    check("T4 keccak256(135*0xff) rate-boundary",
+          k_r135 == "f1d6ccc06d572a1e3f4fb6320f8fd3a2e3f1044c45e4f5d863f5a1b6a0ec3b7c",
+          k_r135)
+    k_r136 = keccak256(b"\xff" * 136).hex()
+    check("T4 keccak256(136*0xff) rate-boundary",
+          k_r136 == "2d417340362cd4144efbf52adc1bfb7a4b40254f55f3b0f09efa6a1ef299b51a",
+          k_r136)
+    # optional hard cross-check against pycryptodome when installed
+    try:
+        from Crypto.Hash import keccak as _kc
+
+        def _ref(msg: bytes) -> str:
+            h = _kc.new(digest_bits=256)
+            h.update(msg)
+            return h.hexdigest()
+
+        for msg in (b"", b"abc", b"a" * 135, b"a" * 136, b"a" * 300,
+                    os.urandom(500)):
+            check(f"T4 pycryptodome cross-check len={len(msg)}",
+                  keccak256(msg).hex() == _ref(msg))
+    except ImportError:
+        print("[SKIP] T4 pycryptodome not installed (pip install pycryptodome)")
 
 
 # --------------------------------------------------------------------- T5
@@ -175,10 +208,17 @@ def t5_secp256k1() -> None:
     check("T5 priv=1 address",
           addr1 == "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", addr1)
 
-    # priv=2 -> address of 2G (well-known vanity-style vector)
+    # priv=2 -> address of 2G. Canonical web3.js vector (checksummed form
+    # 0x2b5AD5c4795C026514f8317c7a215E218DcCD6cF) lowercased:
     addr2 = eth_address((2).to_bytes(32, "big"))
     check("T5 priv=2 address",
-          addr2 == "0x2b5ad5c4795c026514f8317c7a22bebf46eee791", addr2)
+          addr2 == "0x2b5ad5c4795c026514f8317c7a215e218dccd6cf", addr2)
+
+    # additional canonical vectors (web3.js account docs), lowercase compare
+    for k, want in ((3, "0x6813eb9362372eef6200f3b1dbc3f819671cba69"),
+                    (7, "0xd41c057fd1c78805aac12b0a94a405c0461a6fbb")):
+        got = eth_address(k.to_bytes(32, "big"))
+        check(f"T5 priv={k} address", got.lower() == want, got)
 
     # n*G == infinity handled: point_mul(N) -> None-ish? k%=N => 0 => None
     check("T5 priv=N rejected by pubkey_uncompressed",
@@ -268,8 +308,7 @@ def t6_pipeline_e2e() -> None:
     check("T6 address format", len(addr) == 42 and addr.startswith("0x"))
     check("T6 pk is 32 bytes hex", len(pk) == 64)
 
-    # determinism across processes-level cache reset
-    from functools import cache
+    # determinism across process-level cache reset
     import wallet_model
     wallet_model.wallet_for_seed.cache_clear()
     mn3, addr3, pk3 = wallet_for_seed(seed)

@@ -40,6 +40,8 @@ Verified byte-for-byte against mt19937.py reference for all seed classes
 """
 from __future__ import annotations
 
+import hashlib
+
 MASK = 0xFFFFFFFF
 A = 0x9908B0DF
 UPPER = 0x80000000
@@ -111,30 +113,36 @@ class BatchMT:
         return self.first_uint32s_of_seed(seed, n)
 
     # ---------------------------------------------------------------- public
-    def buffers(self, n_outputs: int = 4) -> list[bytes]:
-        """Little-endian packed uint32 entropy buffers for every seed in range."""
+    def buffers(self, n_outputs: int = 16) -> list[bytes]:
+        """Vulnerable-model entropy buffers for every seed in range.
+
+        CRITICAL (oracle-verified against wallet-core Random.cpp@69b2da98):
+        random_buffer() called rng() once PER BYTE and stored the result in a
+        uint8 buffer — i.e. the LOW BYTE of each successive tempering output.
+        This is NOT the little-endian packing of four uint32s; conflating the
+        two produces entirely wrong mnemonics/addresses. The reference truth
+        lives in wallet_model.vulnerable_random_buffer; keep them identical.
+        """
         res = []
         for s in range(self.lo, self.hi + 1):
-            outs = self.first_uint32s_of_seed(s, n_outputs)
-            res.append(b"".join(x.to_bytes(4, "little") for x in outs))
+            mt = _init(s)
+            _twist(mt)
+            res.append(bytes(_temper(mt[i]) & 0xFF for i in range(n_outputs)))
         return res
 
     # checksum-filtered enumeration ---------------------------------------
     def filtered_seeds(self) -> list[int]:
         """Seeds whose 16-byte entropy yields a valid BIP-39 12-word checksum.
 
-        Fused single pass over the range (~6.2% of seeds pass the 4-bit
-        checksum — matches measured 613/10001 on the reference engine).
+        Fused single pass over the range (~6.25% of seeds pass the 4-bit
+        checksum). Entropy model: low byte of each of the first 16 MT19937
+        outputs (see `buffers` docstring — this detail is load-bearing).
         """
-        from bip39 import entropy_checksum_ok
         kept: list[int] = []
         for s in range(self.lo, self.hi + 1):
             mt = _init(s)
             _twist(mt)
-            buf = bytearray(16)
-            for i in range(4):
-                z = _temper(mt[i])
-                buf[i * 4:i * 4 + 4] = z.to_bytes(4, "little")
-            if entropy_checksum_ok(bytes(buf)):
+            buf = bytes(_temper(mt[i]) & 0xFF for i in range(16))
+            if hashlib.sha256(buf).digest()[0] % 16 == 0:
                 kept.append(s)
         return kept

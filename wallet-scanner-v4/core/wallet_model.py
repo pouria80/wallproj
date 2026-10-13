@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 from functools import lru_cache
 
-from mt19937 import MT19937Reference
+from mt19937 import RefMT19937
 from crypto import entropy_to_mnemonic, mnemonic_to_seed, derive_path, eth_address
 
 ENTROPY_LEN = 16  # Trust Wallet browser extension generated 12-word wallets
@@ -32,25 +32,21 @@ DERIVATION_PATH = "m/44'/60'/0'/0/0"
 
 
 def _first_uint32(seed: int) -> int:
-    """First output of a freshly seeded libstdc++ mt19937 — closed form.
-
-    After init_genrand, index==624 so next() twists once and returns
-    temper(mt[0]). mt[0] == seed itself, and the twist sets
-    mt[0] = mt[397] ^ (y>>1) ^ (0x9908B0DF if y&1 else 0) with
-    y = (mt[0]<<1 | mt[1]>>31)|... — but we simply run the reference
-    engine; it is oracle-verified and fast enough for pre-filtering.
-    """
-    e = MT19937Reference()
-    e.seed_scalar(seed & 0xFFFFFFFF)
-    return e.next_uint32()
+    """First output of a freshly seeded libstdc++ mt19937 (reference engine)."""
+    return RefMT19937(seed & 0xFFFFFFFF).genrand_uint32()
 
 
 def vulnerable_random_buffer(seed: int, length: int = ENTROPY_LEN) -> bytes:
-    """Model of wasm/src/Random.cpp@69b2da98 random_buffer(): one uint32 seed,
-    fresh engine, low byte of each successive output."""
-    engine = MT19937Reference()
-    engine.seed_scalar(seed & 0xFFFFFFFF)
-    return bytes(engine.next_uint32() & 0xFF for _ in range(length))
+    """Model of wasm/src/Random.cpp@69b2da98 random_buffer().
+
+    The wallet-core WASM build called std::mt19937::operator() once per byte
+    and stored the result in a uint8 buffer — i.e. the LOW BYTE of each
+    successive tempering output. This is the exact historical behaviour that
+    CVE-2023-31290 describes and that every fast path in this project must
+    reproduce bit-for-bit.
+    """
+    engine = RefMT19937(seed & 0xFFFFFFFF)
+    return bytes(engine.genrand_uint32() & 0xFF for _ in range(length))
 
 
 # ---------------------------------------------------------------- filtering
