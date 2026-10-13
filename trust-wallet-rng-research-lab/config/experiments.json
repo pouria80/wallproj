@@ -20,6 +20,10 @@
     "E5-node-bridge-check": {
       "enabled": true,
       "params": {}
+    },
+    "E6-mnemonic-recovery-roundtrip": {
+      "enabled": true,
+      "params": { "seeds": 8, "entropy_len": 16 }
     }
   }
 }

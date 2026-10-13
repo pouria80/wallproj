@@ -194,6 +194,54 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recover_mnemonic(args: argparse.Namespace) -> int:
+    """Targeted seed→mnemonic reconstruction audit (research scope)."""
+    import json as _json
+    from . import mnemonic_recovery as mr
+
+    provider = mr.get_provider()
+    known_seeds = None
+    if args.known_seeds:
+        raw = Path(args.known_seeds).read_text(encoding="utf-8")
+        data = _json.loads(raw)
+        if not isinstance(data, list) or not all(isinstance(x, int) for x in data):
+            _out("known-seeds file must contain a JSON array of integers")
+            return 2
+        known_seeds = data
+    elif args.start is None or args.end is None:
+        _out("provide either --known-seeds FILE or both --start and --end")
+        return 2
+
+    entropy_len = int(args.entropy_len)
+    try:
+        if known_seeds is not None:
+            report = mr.recover_seeds_for_mnemonic(
+                args.mnemonic, known_seeds=known_seeds,
+                entropy_len=entropy_len, provider=provider)
+        else:
+            report = mr.recover_seeds_for_mnemonic(
+                args.mnemonic, start=int(args.start, 0), end=int(args.end, 0),
+                entropy_len=entropy_len, provider=provider)
+    except mr.RecoveryError as e:
+        _out(f"recovery error: {e}")
+        return 2
+
+    payload = {"provider": provider.name,
+               "provider_vectors_verified": provider.vectors_verified, **report}
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                                   encoding="utf-8")
+        _out(f"wrote {args.json}")
+    _out(f"mode={report['mode']} scanned={report['seeds_scanned']} "
+         f"match_found={report['match_found']}")
+    for m in report["matches"]:
+        _out(f"  seed=0x{m['seed']:08X} entropy={m['entropy_hex']}")
+    for note in report.get("limitations", []):
+        _out(f"  note: {note}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="rng-research",
         description="Research lab for the historical Trust Wallet wallet-core WASM RNG vulnerability (CVE-2023-31290).")
@@ -244,6 +292,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifacts", default=str(ROOT / "artifacts"))
     p.add_argument("--out", default=str(ROOT / "reports"))
     p.set_defaults(fn=cmd_report)
+
+    p = sub.add_parser("recover-mnemonic",
+        help="targeted seed->mnemonic reconstruction audit (research scope; capped enumeration)")
+    p.add_argument("mnemonic", help="BIP-39 mnemonic to audit")
+    p.add_argument("--known-seeds", metavar="FILE",
+                   help="JSON array of uint32 seeds captured during YOUR OWN wallet audit")
+    p.add_argument("--start", help="bounded-scan window start (uint32, accepts 0x..)")
+    p.add_argument("--end", help="bounded-scan window end (uint32; window <= 1,000,000 seeds)")
+    p.add_argument("--entropy-len", default="16", help="expected entropy bytes (default 16)")
+    p.add_argument("--json", help="optional path to write JSON report")
+    p.set_defaults(fn=cmd_recover_mnemonic)
     return ap
 
 
