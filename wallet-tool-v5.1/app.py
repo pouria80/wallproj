@@ -268,6 +268,15 @@ class Handler(BaseHTTPRequestHandler):
                     f"bal={f.balance_sat}")
 
             _engine.on_hit = on_hit
+            # V5.1.1: surface the real sweep window in the log — mt19937 with
+            # a seed range used to log an empty time window, which looked like
+            # the seed range was ignored.
+            if cfg.vuln == "mt19937":
+                win = _engine._mt_window_desc()
+            elif cfg.t_stop_ms > cfg.t_start_ms:
+                win = f"time=[{cfg.t_start_ms} .. {cfg.t_stop_ms}) ms"
+            else:
+                win = "constraint-generated space"
             try:
                 _engine.start()
             except ValueError as e:          # empty window / bad range
@@ -275,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": str(e)}, 400)
             tag = "REDUCED-COVERAGE" if _engine.stats.reduced_coverage \
                 else "full coverage"
-            log(f"scan started ({cfg.vuln}/{cfg.mode}, {tag})")
+            log(f"scan started ({cfg.vuln}/{cfg.mode}, {win}, {tag})")
             return self._json({"ok": True, "coverage_note":
                                _engine.stats_extra_note})
 

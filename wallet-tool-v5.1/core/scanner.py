@@ -332,6 +332,9 @@ class ScanEngine:
             words = np.stack([batch.step() for _ in range(9)], axis=1)
             rows = self._words_to_buffers(words)
             for lane_i, buf in enumerate(rows):
+                if not self._budget_ok():          # V5.1.1: honor max_candidates
+                    self._progress(ts[lane_i])     # mid-batch (was batch-only)
+                    return
                 if not self._fp_gate(buf):
                     continue
                 self.stats.candidates += 1
@@ -367,6 +370,9 @@ class ScanEngine:
         t = t0
         while t < t1 and self._budget_ok():
             for buf in lcg.time_seed_lcg(t, c.lcg_variant):
+                if not self._budget_ok():          # V5.1.1: mid-tick budget stop
+                    self._progress(t * (1000 if c.lcg_seconds else 1))
+                    return
                 if not self._fp_gate(buf):
                     continue
                 self.stats.candidates += 1
@@ -383,11 +389,16 @@ class ScanEngine:
     def _sweep_mt(self) -> None:
         import fast_mt, mt19937
         c = self.cfg
+        # V5.1.1 fix: seed ranges are never clamped to uint32 — a window like
+        # [0, 1000) must sweep exactly 1000 seeds, not a truncated subset.
         use_time = not (c.mt_seed_hi > c.mt_seed_lo)
         lo, hi = ((c.t_start_ms // 1000, c.t_stop_ms // 1000)
-                  if use_time else (c.mt_seed_lo, min(c.mt_seed_hi, 1 << 32)))
+                  if use_time else (c.mt_seed_lo, c.mt_seed_hi))
+        if hi < lo:
+            raise ValueError(f"empty seed range [{lo} .. {hi})")
         CH = 8192                                   # vector lanes per chunk
-        seeds = np.arange(lo, hi, dtype=np.uint32)
+        # np.arange on int64 keeps every seed in [lo, hi) — no uint32 wrap.
+        seeds = np.arange(lo, hi, dtype=np.int64)
         for i in range(0, len(seeds), CH):
             if not self._budget_ok():
                 return
@@ -395,12 +406,19 @@ class ScanEngine:
             # historical vulnerable path: one rng() call PER BYTE (low byte of
             # each tempered output). Vectorized engine is bit-identical to the
             # scalar reference; fall back when numpy/cupy are absent.
+            # V5.1.1: MT init masks the seed to uint32 EXACTLY like C's
+            # `uint32_t s = seed` conversion — so we hand fast_mt the masked
+            # view but keep the true int64 seeds for cursor/stats semantics.
             try:
-                bufs = fast_mt.batch_entropy_auto(chunk, n_out=16)
+                bufs = fast_mt.batch_entropy_auto(
+                    chunk.astype(np.uint32), n_out=16)
                 rows = [bytes(bufs[j]) for j in range(bufs.shape[0])]
             except RuntimeError:
                 rows = [mt19937.ref_entropy_buffer(int(s)) for s in chunk]
             for j, buf in enumerate(rows):
+                if not self._budget_ok():
+                    self._progress(int(chunk[j]))   # cursor = last seed/sec
+                    return
                 if not self._fp_gate(buf):
                     continue
                 self.stats.candidates += 1
@@ -412,6 +430,16 @@ class ScanEngine:
                 else:
                     self._probe_bip39(buf, t_ms, src)
             self._progress(int(chunk[-1]))          # cursor = last seed/sec
+
+    def _mt_window_desc(self) -> str:
+        """Human-readable sweep window for mt19937 (V5.1.1 fix: the log line
+        used to print an empty time window whenever a seed range was given —
+        MT lane B is keyed by SEEDS, not wall-clock ms)."""
+        c = self.cfg
+        if c.mt_seed_hi > c.mt_seed_lo:
+            return f"seeds=[{c.mt_seed_lo} .. {c.mt_seed_hi})"
+        return (f"time-seeded=[{c.t_start_ms // 1000} .. "
+                f"{c.t_stop_ms // 1000}) s")
 
     # -- probing --------------------------------------------------------------
     def _probe_direct(self, entropy: bytes, t_ms: int, src: str) -> None:

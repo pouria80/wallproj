@@ -278,4 +278,8 @@ def batch_entropy_auto(seeds, n_out: int = 16):
     Raises RuntimeError when neither numpy nor cupy is installed; callers
     must fall back to the pure-python scalar engine."""
     import numpy as np
-    return batch_entropy(np.asarray(seeds, dtype=np.uint32), n_out=n_out)
+    # V5.1.1: mask to uint32 EXACTLY like C's `uint32_t s = seed` conversion
+    # in std::mt19937::seed() — seeds above 2^32 wrap deterministically and
+    # must match the scalar reference bit-for-bit.
+    return batch_entropy(np.asarray(seeds, dtype=np.uint64).astype(
+        np.uint32), n_out=n_out)

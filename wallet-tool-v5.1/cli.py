@@ -159,8 +159,14 @@ def cmd_scan(args):
         if ans != "YES":
             print("aborted"); return 1
 
+    if cfg.vuln == "mt19937":
+        win = engine._mt_window_desc()
+    elif cfg.t_stop_ms > cfg.t_start_ms:
+        win = f"window=[{args.start} .. {args.stop})"
+    else:
+        win = "window=[constraint-generated)"
     print(f"scan: vuln={cfg.vuln} mode={cfg.mode} "
-          f"window=[{args.start} .. {args.stop}) coins={cfg.coins} "
+          f"{win} coins={cfg.coins} "
           f"styles={cfg.styles or 'ALL'} balance={args.balance}",
           file=sys.stderr)
     engine.start()
@@ -184,8 +190,19 @@ def cmd_status(_args):
         print("no scan recorded yet"); return 1
     with open(PROGRESS_FILE) as fh:
         j = json.load(fh)
+    # V5.1.1: normalize stats for display (rate/elapsed were the buggy pair).
+    cand = int(j.get("candidates", 0))
+    work_s = float(j.get("elapsed", 0.0))
+    rate = cand / max(work_s, 1e-9)
+    j["rate"] = rate
+    j["elapsed"] = work_s
     for k, v in j.items():
-        print(f"{k:>18}: {v:,}" if isinstance(v, int) else f"{k:>18}: {v}")
+        if isinstance(v, float):
+            print(f"{k:>18}: {v:,.3f}")
+        elif isinstance(v, int):
+            print(f"{k:>18}: {v:,}")
+        else:
+            print(f"{k:>18}: {v}")
     return 0
 
 

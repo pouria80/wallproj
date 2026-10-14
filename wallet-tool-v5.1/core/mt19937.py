@@ -81,5 +81,5 @@ def ref_entropy_buffer(seed: int) -> bytes:
     """16-byte entropy buffer exactly as vulnerable wallet-core consumed it:
     random_buffer() called rng() once PER BYTE → low byte of each successive
     tempering output (see wasm/src/Random.cpp@69b2da98)."""
-    g = RefMT19937(seed)
+    g = RefMT19937(seed & 0xFFFFFFFF)     # C uint32_t conversion semantics
     return bytes(g.genrand_uint32() & 0xFF for _ in range(16))
