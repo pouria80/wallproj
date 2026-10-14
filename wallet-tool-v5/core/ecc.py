@@ -26,20 +26,23 @@ def inv_mod(a: int, m: int = _P) -> int:
 
 
 def _jdouble(P_):
-    """Jacobian doubling, standard d3b8 (Hankerson et al., Alg. 3.21).
+    """Jacobian doubling for y² = x³ + 7 (a = 0), d3b8 (Hankerson Alg. 3.21).
 
-    NOTE: the previous "SOLHA" variant used here was algebraically wrong
-    (it mixed the halving rule of char-2 curves into y²=x³+7), producing
-    on-curve but DIFFERENT points — caught by BIP-32 vector m/0'.
+    BUGFIX (v5.1): the previous line was
+        m = 3X² + 7·Z⁴
+    which is the generic a≠0 formula with the curve coefficient *substituted*
+    for `a`. For secp256k1, a = 0: the slope numerator is exactly M = 3X² and
+    the Z⁴ term only enters through the homogeneous invariant
+    Y²Z⁴ = X³ + 7Z⁶ — never as "+7·Z⁴" in M. The wrong M produced off-curve
+    points for every multiplication containing a doubling step (2G, m/0', …).
     """
     X, Y, Z = P_
     if Y == 0 or Z == 0:
         return (0, 0, 0)                      # point at infinity
     yy = (Y * Y) % _P
     yyyy = (yy * yy) % _P
-    zz = (Z * Z) % _P
     s = (4 * X * yy) % _P
-    m = (3 * X * X + 7 * (zz * zz % _P)) % _P   # a = 0 -> 3X² + 7Z⁴
+    m = (3 * X * X) % _P                       # a = 0 -> M = 3X²  (no 7Z⁴!)
     x2 = (m * m - 2 * s) % _P
     y2 = (m * (s - x2) - 8 * yyyy) % _P
     z2 = (2 * Y * Z) % _P
