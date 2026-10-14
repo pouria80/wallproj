@@ -343,6 +343,106 @@ def cmd_fingerprint(args):
     return 0
 
 
+def cmd_benchmark(args):
+    """Measure RAW candidate throughput per RNG variant (no network, no
+    balance I/O — pure generation speed). Use this to size realistic scan
+    windows before committing hours of work; GPU (CuPy) is auto-detected."""
+    import time as _t
+    import numpy as _np
+    import fast_mt, lcg, mwc1616
+
+    n = max(args.n, 1024)
+    rows = []
+
+    def bench(name, fn):
+        fn(min(n, 256))                       # warm caches / JIT
+        t0 = _t.perf_counter()
+        made = fn(n)
+        dt = _t.perf_counter() - t0
+        rate = made / max(dt, 1e-9)
+        rows.append((name, made, dt, rate))
+        print(f"{name:<28} {made:>12,} cand  {dt:7.3f}s  "
+              f"{rate:>12,.0f}/s", flush=True)
+
+    def randstorm(count):
+        made = 0
+        t = 1_300_000_000_000                  # arbitrary ms epoch
+        lanes = min(4096, count)
+        while made < count:
+            ts = [t + i for i in range(lanes) if made + i < count]
+            b = mwc1616.V8Batch([v & 0xFFFFFFFF for v in ts],
+                                [((v >> 32) ^ (v * 2654435761)) & 0xFFFFFFFF
+                                 for v in ts])
+            words = _np.stack([b.step() for _ in range(9)], axis=1)
+            made += words.shape[0]
+            t += lanes
+        return made
+
+    def lcg_variant(variant, count):
+        made = 0
+        sec = 1_300_000_000
+        while made < count:
+            bufs = list(lcg.time_seed_lcg(sec, variant))
+            made += len(bufs)
+            sec += 1
+        return made
+
+    def mt_engine(count, use_gpu=False):
+        made = 0
+        lo = 1_000_000_000
+        CH = min(8192, count)
+        xp = None
+        if use_gpu:
+            import cupy as xp  # noqa: F841
+        while made < count:
+            seeds = _np.arange(lo, lo + CH, dtype=_np.uint32)
+            if use_gpu:
+                import cupy
+                bufs = fast_mt.batch_entropy(cupy.asarray(seeds))
+                bufs = cupy.asnumpy(bufs)
+            else:
+                bufs = fast_mt.batch_entropy(seeds)
+            made += CH
+            lo += CH
+        return made
+
+    bench("randstorm/mwc1616", randstorm)
+    for v in ("java", "msvc_mod", "msvc_top", "nr"):
+        bench(f"lcg/{v}", lambda c, vv=v: lcg_variant(vv, c))
+    if fast_mt.vectorization_available():
+        bench("mt19937/numpy-vector", mt_engine)
+    else:
+        print("mt19937/numpy-vector       skipped (numpy missing)")
+    if not args.no_gpu_check and fast_mt.gpu_available():
+        bench("mt19937/cuda-cupy", lambda c: mt_engine(c, use_gpu=True))
+    elif not args.no_gpu_check:
+        print("mt19937/cuda-cupy          skipped (no CuPy/CUDA device)")
+
+    # scalar reference sanity: exactness matters more than speed here
+    import mt19937
+    s = 1_234_567_890
+    if fast_mt.vectorization_available():
+        got = _np.asarray(fast_mt.batch_entropy(
+            _np.array([s], dtype=_np.uint32)))[0].tobytes()
+        assert got == mt19937.ref_entropy_buffer(s)
+        print("\nexactness spot-check vs scalar reference: OK")
+
+    best = max(rows, key=lambda r: r[3])
+    span_ms = int(args.hours * 3600 * 1000)
+    print(f"\nhottest lane: {best[0]} @ {best[3]:,.0f} cand/s")
+    print(f"=> a {args.hours}-hour randstorm window (1 ms stride = "
+          f"{span_ms:,} candidates) would take "
+          f"~{span_ms / max(best[3], 1) / 3600:.1f} h at that rate.")
+    print("guidance: pure python tops out ~1e4–1e5 cand/s → target SMALL,"
+          "\n           precise windows (one hour/day), or run on a GPU box.")
+    json.dump({"results": [{"lane": r[0], "candidates": r[1],
+                           "seconds": round(r[2], 4),
+                           "cand_per_s": round(r[3], 1)} for r in rows],
+               "gpu_available": fast_mt.gpu_available()},
+              open(os.path.join(STATE_DIR, "benchmark.json"), "w"), indent=2)
+    return 0
+
+
 # ---------------------------------------------------------------------- main
 def build_parser():
     p = argparse.ArgumentParser(prog="wallet-scanner-v5",
@@ -400,6 +500,17 @@ def build_parser():
                         help="classify an RNG byte sample (hex)")
     fp.add_argument("sample_hex")
     fp.set_defaults(fn=cmd_fingerprint)
+
+    bm = sub.add_parser("benchmark",
+                        help="measure raw cand/s per RNG variant "
+                             "(numpy vs GPU)")
+    bm.add_argument("--n", type=int, default=200_000,
+                    help="candidates per lane under test")
+    bm.add_argument("--hours", type=float, default=1.0,
+                    help="window size to extrapolate (h)")
+    bm.add_argument("--no-gpu-check", action="store_true",
+                    help="skip CuPy/CUDA probe entirely")
+    bm.set_defaults(fn=cmd_benchmark)
     return p
 
 

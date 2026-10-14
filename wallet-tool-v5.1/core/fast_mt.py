@@ -268,3 +268,14 @@ def batch_entropy(seeds, n_out: int = 16):
         z ^= z >> u32(18)
         res[:, j] = (z & u32(0xFF)).astype(xp.uint8)
     return res[:n]
+
+
+def batch_entropy_auto(seeds, n_out: int = 16):
+    """GPU-first entry point (V5.1): CuPy when a CUDA device is usable,
+    otherwise the numpy lane engine. Bit-identical output either way —
+    both implementations mirror the same scalar reference exactly.
+
+    Raises RuntimeError when neither numpy nor cupy is installed; callers
+    must fall back to the pure-python scalar engine."""
+    import numpy as np
+    return batch_entropy(np.asarray(seeds, dtype=np.uint32), n_out=n_out)

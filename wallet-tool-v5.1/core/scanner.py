@@ -117,8 +117,8 @@ class ScanConfig:
 # ------------------------------------------------------------------- stats
 @dataclass
 class ScanStats:
-    started: float = 0.0
-    elapsed: float = 0.0
+    started: float = 0.0            # wall-clock epoch of start()
+    elapsed: float = 0.0            # sweep WORK time (monotonic seconds)
     candidates: int = 0
     addresses_derived: int = 0
     bloom_skips: int = 0
@@ -129,24 +129,37 @@ class ScanStats:
     coverage_keeps: float = 1.0
     finished: bool = False
     stopped: bool = False
+    cursor_ms: int = 0              # last swept timestamp (randstorm/lcg)
 
     def rate(self) -> float:
+        """Candidates/second over actual sweep work time only.
+
+        V5.1 fix: previously derived from `elapsed`, which included engine
+        startup and gaps between sweeps — the displayed rate collapsed to
+        ~0 whenever a scan idled before/at the progress tick.
+        """
         e = max(self.elapsed, 1e-9)
         return self.candidates / e
 
     def eta_s(self, cfg: ScanConfig) -> Optional[float]:
-        if cfg.t_stop_ms and self.started and self.candidates:
-            frac = (self._done_ms(cfg) /
-                    max(cfg.t_stop_ms - cfg.t_start_ms, 1))
-            if 0 < frac < 1:
-                return self.elapsed * (1 - frac) / frac
-        return None
+        p = self.percent(cfg)
+        if p is None or not (0.0 < p < 1.0):
+            return None
+        return self.elapsed * (1 - p) / p
 
-    def _done_ms(self, cfg: ScanConfig) -> int:
-        if cfg.vuln == "randstorm":
-            return min(self.candidates * cfg.stride_ms,
-                       cfg.t_stop_ms - cfg.t_start_ms)
-        return 0
+    def percent(self, cfg: ScanConfig) -> Optional[float]:
+        """True fraction of the configured search space already swept."""
+        if cfg.vuln == "mt19937" and cfg.mt_seed_hi > cfg.mt_seed_lo:
+            span = cfg.mt_seed_hi - cfg.mt_seed_lo
+            done = self.cursor_ms - cfg.mt_seed_lo   # cursor carries seed
+        elif cfg.t_stop_ms > cfg.t_start_ms:
+            span = cfg.t_stop_ms - cfg.t_start_ms
+            done = self.cursor_ms - cfg.t_start_ms
+        else:
+            return None
+        if span <= 0:
+            return None
+        return min(max(done / span, 0.0), 1.0)
 
 
 # ------------------------------------------------------------------ engine
@@ -184,6 +197,8 @@ class ScanEngine:
         self.stats = ScanStats()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._work_s = 0.0                      # accumulated sweep time
+        self._run_t0 = time.monotonic()         # set again in _run()
         self.on_hit = None                    # callback(Finding) — GUI hook
         self.on_progress = None               # callback(ScanStats)
 
@@ -192,10 +207,17 @@ class ScanEngine:
         if self._thread and self._thread.is_alive():
             raise RuntimeError("scan already running")
         c = self.cfg
-        if (c.vuln != "mt19937" or c.mt_seed_hi <= c.mt_seed_lo) \
-                and c.t_stop_ms <= c.t_start_ms:
+        has_window = c.t_stop_ms > c.t_start_ms
+        has_seed_range = (c.vuln == "mt19937" and c.mt_seed_hi > c.mt_seed_lo)
+        # Constraint-guided lanes (e.g. known_phrase) enumerate the solver's
+        # own solution space — a time window is meaningless there (V5.1 fix:
+        # lane B of the selftest used to die with a bogus "empty window").
+        generating = (self.constraint is not None and
+                      any(p.generating for p in self.constraint.parts))
+        if not (has_window or has_seed_range or generating):
             raise ValueError("empty window: set t_stop_ms > t_start_ms "
-                             "(or an explicit mt19937 seed range)")
+                             "(or an explicit mt19937 seed range, "
+                             "or a generating constraint like --known-phrase)")
         self._stop.clear()
         self.stats = ScanStats(started=time.time())
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -214,6 +236,7 @@ class ScanEngine:
 
     # -- main loop ---------------------------------------------------------
     def _run(self) -> None:
+        w0 = self._run_t0 = time.monotonic()
         try:
             self.stats.reduced_coverage = not self.prune_plan.lossless
             self.stats.coverage_keeps = self.prune_plan.total_keeps
@@ -236,7 +259,16 @@ class ScanEngine:
                 raise ValueError(f"unknown vuln {self.cfg.vuln!r}")
             self.stats.finished = not self.stats.stopped
         finally:
-            self.stats.elapsed = time.time() - self.stats.started
+            self._work_s += time.monotonic() - w0
+            self.stats.elapsed = self._work_s
+
+    def _progress(self, cursor: int) -> None:
+        """Report live stats at sweep boundaries (V5.1: was never called
+        mid-sweep, so status showed elapsed=0.0 and rate=0 forever)."""
+        self.stats.cursor_ms = cursor
+        self.stats.elapsed = self._work_s + (time.monotonic() - self._run_t0)
+        if self.on_progress:
+            self.on_progress(self.stats)
 
     def _budget_ok(self) -> bool:
         c = self.cfg
@@ -268,9 +300,7 @@ class ScanEngine:
                 self._probe_bip39(buf, 0, src)
             else:
                 self._probe_direct(buf, 0, src)
-        if self.on_progress:
-            self.stats.elapsed = time.time() - self.stats.started
-            self.on_progress(self.stats)
+        self._progress(0)
 
     def _fp_gate(self, buf: bytes) -> bool:
         """Apply heuristic/fingerprint filters; count rejections."""
@@ -284,6 +314,8 @@ class ScanEngine:
     # -- Randstorm (V8 MWC1616) --------------------------------------------
     def _sweep_randstorm(self) -> None:
         c = self.cfg
+        # NOTE: default stride is 1 ms — a minute-sized stride would SKIP
+        # every millisecond timestamp in between and miss planted wallets.
         lanes = max(c.batch, 1)
         # Build lane seeds: consecutive ms timestamps mapped through the
         # canonical time-seeding helper (see mwc1616.v8_seeds_from_time_ms).
@@ -308,9 +340,7 @@ class ScanEngine:
                     self._probe_direct(buf, tm, "randstorm/mwc1616")
                 else:
                     self._probe_bip39(buf, tm, "randstorm/mwc1616")
-            if self.on_progress:
-                self.stats.elapsed = time.time() - self.stats.started
-                self.on_progress(self.stats)
+            self._progress(ts[-1] + c.stride_ms)
             t += lanes * c.stride_ms
 
     @staticmethod
@@ -346,35 +376,42 @@ class ScanEngine:
                 else:
                     self._probe_bip39(buf, t * 1000, src)
             t += 1
-            if t % 3600 == 0 and self.on_progress:
-                self.stats.elapsed = time.time() - self.stats.started
-                self.on_progress(self.stats)
+            if t % 3600 == 0:
+                self._progress(t * (1000 if c.lcg_seconds else 1))
 
     # -- MT19937 sweeps -------------------------------------------------------
     def _sweep_mt(self) -> None:
-        import mt19937
+        import fast_mt, mt19937
         c = self.cfg
-        if c.mt_seed_hi > c.mt_seed_lo:
-            # explicit 32-bit seed range (e.g. a fingerprint narrowed it)
-            lo, hi = c.mt_seed_lo, min(c.mt_seed_hi, 1 << 32)
-            seq = ((s, s) for s in range(lo, hi))
-        else:
-            t0 = c.t_start_ms // 1000
-            t1 = c.t_stop_ms // 1000
-            seq = ((sec & 0xFFFFFFFF, sec * 1000) for sec in range(t0, t1))
-        for seed, t_ms in seq:
+        use_time = not (c.mt_seed_hi > c.mt_seed_lo)
+        lo, hi = ((c.t_start_ms // 1000, c.t_stop_ms // 1000)
+                  if use_time else (c.mt_seed_lo, min(c.mt_seed_hi, 1 << 32)))
+        CH = 8192                                   # vector lanes per chunk
+        seeds = np.arange(lo, hi, dtype=np.uint32)
+        for i in range(0, len(seeds), CH):
             if not self._budget_ok():
-                break
+                return
+            chunk = seeds[i:i + CH]
             # historical vulnerable path: one rng() call PER BYTE (low byte of
-            # each tempered output) — exactly ref_entropy_buffer's semantics.
-            buf = mt19937.ref_entropy_buffer(seed)
-            if not self._fp_gate(buf):
-                continue
-            self.stats.candidates += 1
-            if c.mode == "direct":
-                self._probe_direct(buf, t_ms, "mt19937/std")
-            else:
-                self._probe_bip39(buf, t_ms, "mt19937/std")
+            # each tempered output). Vectorized engine is bit-identical to the
+            # scalar reference; fall back when numpy/cupy are absent.
+            try:
+                bufs = fast_mt.batch_entropy_auto(chunk, n_out=16)
+                rows = [bytes(bufs[j]) for j in range(bufs.shape[0])]
+            except RuntimeError:
+                rows = [mt19937.ref_entropy_buffer(int(s)) for s in chunk]
+            for j, buf in enumerate(rows):
+                if not self._fp_gate(buf):
+                    continue
+                self.stats.candidates += 1
+                sec = int(chunk[j])
+                t_ms = sec * 1000 if use_time else sec
+                src = "mt19937/std"
+                if c.mode == "direct":
+                    self._probe_direct(buf, t_ms, src)
+                else:
+                    self._probe_bip39(buf, t_ms, src)
+            self._progress(int(chunk[-1]))          # cursor = last seed/sec
 
     # -- probing --------------------------------------------------------------
     def _probe_direct(self, entropy: bytes, t_ms: int, src: str) -> None:

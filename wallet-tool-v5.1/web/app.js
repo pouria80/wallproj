@@ -92,9 +92,12 @@ async function refresh() {
   }
   const st = s.stats, cfg = s.config || {};
   $("covnote").textContent = s.coverage_note || "";
-  const total = Math.max((cfg.t_stop_ms || 0) - (cfg.t_start_ms || 0), 1);
-  const done = Math.min(st.candidates * (cfg.stride_ms || 1), total);
-  $("bar").style.width = (100 * done / total).toFixed(1) + "%";
+  // V5.1: true progress from engine cursor (percent), not candidate count —
+  // filtered/rejected candidates used to skew the bar and hide real ETA.
+  const pct = (st.percent == null) ? null : st.percent;
+  if (pct != null) $("bar").style.width = (100 * pct).toFixed(1) + "%";
+  const etaTxt = (st.eta_s && st.eta_s > 0)
+    ? nf.format(Math.round(st.eta_s)) + "s" : "—";
 
   $("stats").innerHTML = [
     statCard("کاندیدها", nf.format(st.candidates)),
@@ -105,6 +108,9 @@ async function refresh() {
     statCard("یافته", nf.format(st.hits)),
     statCard("نرخ /s", nf.format(Math.round(st.rate || 0))),
     statCard("زمان (s)", (st.elapsed || 0).toFixed(1)),
+    statCard("پیشرفت", pct == null ? "—"
+      : nf.format(Math.round(pct * 1000) / 10) + "٪"),
+    statCard("ETA", etaTxt),
     statCard("پوشش", st.reduced_coverage
       ? "⚠ REDUCED (" + ((st.coverage_keeps || 1) * 100).toFixed(1) + "%)"
       : "۱۰۰٪"),

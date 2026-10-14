@@ -174,12 +174,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "findings": [], "logs": _logs[-40:],
                                    "note": "no scan started"})
             st = eng.stats
-            st.elapsed = (time.time() - st.started) if eng.running \
-                else st.elapsed
+            # V5.1: `elapsed` is maintained by the engine itself (monotonic
+            # sweep time) — no wall-clock overwrite here anymore, which used
+            # to produce the bogus "elapsed: 0.0" / rate collapse.
             return self._json({
                 "running": eng.running,
                 "config": {k: v for k, v in eng.cfg.__dict__.items()},
-                "stats": {**st.__dict__, "rate": st.rate()},
+                "stats": {**st.__dict__, "rate": st.rate(),
+                          "percent": st.percent(eng.cfg),
+                          "eta_s": st.eta_s(eng.cfg)},
                 "coverage_note": eng.stats_extra_note,
                 "prune_plan": eng.prune_plan.as_dict(),
                 "fingerprint": (eng.fingerprint_report.as_dict()
