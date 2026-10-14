@@ -83,14 +83,18 @@ def _chunk_scan(args):
     mode = "scalar"
     try:
         import numpy as np
-        from fingerprint import batch_entropy_np
-        mode = "cupy-gpu" if globals().get("_GPU") else "numpy-simd"
+        from fast_mt import batch_entropy, gpu_available
+        # honest engine label: cupy path only if a CUDA device really answers
+        if globals().get("_GPU") and gpu_available():
+            mode = "cupy-gpu"
+        else:
+            mode = "numpy-simd"
         step = 1 << 17                       # ≤131k-lane batches: few MB RAM
         base = lo
         while base <= hi:
             cnt = min(step, hi - base + 1)
             arr = np.arange(base, base + cnt, dtype=np.uint32)
-            bufs = batch_entropy_np(arr)
+            bufs = batch_entropy(arr)
             first = bufs[:, 0]               # entropy[0] column (uint8 view)
             if prune_buckets is not None or parity is not None:
                 bucket = (first >> 4).astype(np.int64)
@@ -106,10 +110,21 @@ def _chunk_scan(args):
                 idx = np.nonzero(mask)[0]
             else:
                 idx = np.arange(cnt)
-            for k in idx:
-                b = bufs[k].tobytes()
-                if hashlib.sha256(b).digest()[0] % 16 == 0:
-                    kept.append(base + int(k))
+            survivors = bufs[idx]            # contiguous copy (or full view)
+            # fused checksum pass: bytesview → uint64 lanes → numpy vectorized
+            # sha256 over the 16-byte rows. EXACT same predicate as
+            # hashlib.sha256(row).digest()[0] % 16 == 0 — cross-checked in
+            # tests/test_v5_additions.py against hashlib on 200k+ random rows.
+            try:
+                from sha256_vec import sha_first_byte_rows   # numpy SIMD path
+                fb = sha_first_byte_rows(survivors.reshape(-1, 16))
+                ok = (fb % 16) == 0
+                kept.extend((base + idx[ok]).tolist())
+            except Exception:
+                for kk, k in enumerate(idx):
+                    b = survivors[kk].tobytes()
+                    if hashlib.sha256(b).digest()[0] % 16 == 0:
+                        kept.append(base + int(k))
             base += cnt
     except ImportError:
         from fast_mt import _first_outputs

@@ -183,3 +183,88 @@ class BatchMT:
             if sha(buf).digest()[0] % 16 == 0:
                 kept.append(s)
         return kept
+
+
+# ---------------------------------------------------------------------------
+# CANONICAL SIMD batch engine (numpy lanes; bit-for-bit identical to scalar)
+# ---------------------------------------------------------------------------
+# This is the ONLY vectorized MT path used by the scanner hot loop. It was
+# differential-tested against the oracle-verified scalar engine
+# (`_first_outputs`) and the independent reference (`mt19937.RefMT19937`) on
+# thousands of seeds incl. all boundary classes — see tests/test_v5_additions.py.
+# The old core/fingerprint.py contained an INCOMPATIBLE "in-place twist"
+# vector model that diverged from libstdc++ from output #2 onward; it has been
+# retired so no code can ever import the wrong semantics again.
+
+def _xp():
+    try:
+        import numpy as np
+        return np
+    except ImportError:
+        return None
+
+
+def vectorization_available() -> bool:
+    return _xp() is not None
+
+
+def gpu_available() -> bool:
+    """True iff CuPy with a usable CUDA device is present (optional accelerator)."""
+    try:
+        import cupy  # noqa: F401
+        cupy.cuda.Device().id
+        return True
+    except Exception:
+        return False
+
+
+def batch_entropy(seeds, n_out: int = 16):
+    """Exact first-n_out entropy bytes for an array of uint32 seeds.
+
+    Lane-parallel evaluation of the canonical std::mt19937 model:
+      init recurrence up to word 397+n_out-1 (sequential in i, parallel across
+      lanes), twist rows j=0..n_out-1 directly from ORIGINAL words, standard
+      tempering. Bit-for-bit identical to `_first_outputs` / RefMT19937.
+    Returns a (len(seeds), n_out) uint8 array (numpy or cupy, per availability).
+    Raises RuntimeError when neither numpy nor cupy is installed — callers must
+    fall back to the scalar engine.
+    """
+    xp = None
+    if gpu_available():
+        import cupy as xp  # type: ignore
+    else:
+        xp = _xp()
+    if xp is None:
+        raise RuntimeError("numpy/cupy unavailable — use scalar fallback")
+
+    seeds = xp.asarray(seeds, dtype=xp.uint32)
+    n = int(seeds.shape[0])
+    G = 1
+    while G < n:                              # pad to power-of-two lanes
+        G <<= 1
+    s = xp.zeros(G, dtype=xp.uint32)
+    s[:n] = seeds
+
+    u32 = xp.uint32
+    needed = set(range(0, n_out + 1)) | set(range(M, M + n_out))
+    limit = max(needed)                       # ≤ 412 for n_out ≤ 16
+    store: dict[int, object] = {}
+    cur = s.copy()
+    store[0] = cur.copy()
+    for i in range(1, limit + 1):
+        t = cur ^ (cur >> u32(30))
+        cur = (xp.uint32(INIT_MULT) * t + xp.uint32(i)).astype(u32)
+        if i in needed:
+            store[i] = cur.copy()
+    res = xp.empty((G, n_out), dtype=xp.uint8)
+    for j in range(n_out):
+        y = (store[j] & u32(UPPER)) | (store[j + 1] & u32(LOWER))
+        w = store[j + M] ^ (y >> u32(1))
+        w = w ^ xp.where((y & u32(1)).astype(bool), u32(A), u32(0))
+        z = w
+        z ^= z >> u32(11)
+        z ^= (z << u32(7)) & u32(0x9D2C5680)
+        z ^= (z << u32(15)) & u32(0xEFC60000)
+        z ^= z >> u32(18)
+        res[:, j] = (z & u32(0xFF)).astype(xp.uint8)
+    return res[:n]
