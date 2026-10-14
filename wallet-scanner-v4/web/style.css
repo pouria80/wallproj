@@ -58,3 +58,8 @@ td.ltr{direction:ltr;text-align:left}
   height:180px;overflow-y:auto;font-size:.75rem;line-height:1.7;margin:0;white-space:pre-wrap}
 footer{padding:14px 24px;border-top:1px solid var(--line);color:var(--dim);font-size:.72rem;text-align:center}
 @media(max-width:900px){main{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}}
+
+.cov { font-size: 12px; padding: 2px 10px; border-radius: 12px; }
+.cov.full { background: #1a3a24; color: #3fb950; }
+.cov.reduced { background: #3a2a1a; color: #e3b341; }
+.assets { font-size: 11px; max-width: 260px; word-break: break-word; }

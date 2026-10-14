@@ -32,6 +32,9 @@ function cfgPayload() {
     threshold_eth: Number($("in-theth").value || 0),
     threshold_usdt: Number($("in-thusd").value || 0),
     live_rpc: $("in-live").checked,
+    fingerprint_prune: ($("in-prune") ? $("in-prune").value.trim() : ""),
+    parity_filter: ($("in-parity") ? $("in-parity").value : ""),
+    cpu_budget: Number(($("in-budget") ? $("in-budget").value : "35")) / 100,
   };
 }
 
@@ -79,6 +82,16 @@ function render(st) {
   $("st-errors").textContent  = faNum(st.errors);
   $("last-error").textContent = st.last_error || "";
 
+  const cov = $("coverage-badge");
+  if (st.coverage_mode === "REDUCED") {
+    cov.className = "cov reduced";
+    cov.textContent = "⚠️ پوشش: REDUCED — فیلتر انگشت‌نگاری فعال است (فقط آموزش)";
+  } else {
+    cov.className = "cov full";
+    cov.textContent = "پوشش: FULL 100%";
+  }
+  $("engine-mode").textContent = st.engine_mode ? ("engine: " + st.engine_mode) : "";
+
   /* funded table (re-render only when contents change) */
   const rows = (st.funded || []).slice().reverse();
   const key = JSON.stringify(rows.map(r => r.seed));
@@ -96,6 +109,7 @@ function render(st) {
         `<td>${Number(r.eth).toFixed(6)}</td>` +
         `<td>${Number(r.usdt).toFixed(2)}</td>` +
         `<td>${Number(r.usdc).toFixed(2)}</td>` +
+        `<td class="assets">${Object.entries(r.assets || {}).map(([k,v]) => k + ":" + Number(v).toFixed(4)).join("، ") || "—"}</td>` +
         `<td>${r.found_at || ""}</td>` +
         `<td class="mn" title="${r.mnemonic}">${r.mnemonic}</td>`;
       tb.appendChild(tr);

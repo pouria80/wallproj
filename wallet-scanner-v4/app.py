@@ -35,7 +35,8 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8000
 engine = SearchEngine()
 
 _INT_KEYS = {"start_seed", "end_seed", "num_workers", "chunk_size"}
-_FLOAT_KEYS = {"threshold_eth", "threshold_usdt"}
+_FLOAT_KEYS = {"threshold_eth", "threshold_usdt", "cpu_budget"}
+_STR_KEYS = {"fingerprint_prune", "parity_filter"}
 _BOOL_KEYS = {"live_rpc"}
 
 
@@ -47,6 +48,9 @@ def _apply_cfg(data: dict) -> None:
     for k in _FLOAT_KEYS:
         if data.get(k) not in (None, ""):
             kw[k] = float(data[k])
+    for k in _STR_KEYS:
+        if data.get(k) is not None:
+            kw[k] = str(data[k])
     if "live_rpc" in data and data["live_rpc"] is not None:
         # GUI flag maps onto engine.derive_only (inverse meaning)
         kw["derive_only"] = not bool(data["live_rpc"])
