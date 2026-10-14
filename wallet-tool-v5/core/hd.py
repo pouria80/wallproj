@@ -90,9 +90,9 @@ CHAINS: Dict[str, Chain] = {
     "btc":  Chain("BTC",  0x00, 0x05, "bc",  0x80),
     "ltc":  Chain("LTC",  0x30, 0x32, "ltc", 0xB0),
     "doge": Chain("DOGE", 0x1E, 0x16, None,  0x9E),
-    # Zcash t-addr prefixes are TWO bytes: t1pubkeyID = 0x1CBA, t1scriptID =
+    # Zcash t-addr prefixes are TWO bytes: t1pubkeyID = 0x1CB8, t1scriptID =
     # 0x1CBD (mainnet).  Verified against reference wallet vectors.
-    "zec":  Chain("ZEC",  0x1CBA, 0x1CBD, None, 0x80),
+    "zec":  Chain("ZEC",  0x1CB8, 0x1CBD, None, 0x80),
 }
 
 # Historical derivation paths (label -> path template)

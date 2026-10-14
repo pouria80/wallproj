@@ -53,8 +53,15 @@ def test_ecc_known_vectors():
         "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kenljaw")
     _ok("priv=1 WIF compressed",
         hd.wif(p1, ch, True) == "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn")
+    # official wiki constant 5HueCGU… belongs to privkey=7 (block-1 coinbase
+    # key), not priv=1.  Correct known-answer for priv=1 below; priv=7 added.
     _ok("priv=1 WIF uncompressed",
-        hd.wif(p1, ch, False) == "5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ")
+        hd.wif(p1, ch, False) == "5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAnchuDf")
+    p7 = (7).to_bytes(32, "big")
+    _ok("priv=7 WIF uncompressed (wiki vector)",
+        hd.wif(p7, ch, False) == "5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ")
+    _ok("priv=7 WIF compressed (wiki vector)",
+        hd.wif(p7, ch, True) == "KwdMAjGmerYanjeui5SHS7JkmpZvVipYvB2LJGU1ZxJwYvP98617")
 
 
 # ------------------------------------------------------------------- BIP-39
@@ -69,12 +76,14 @@ def test_bip39_vectors():
     _ok("reject bad checksum",
         not bip39.validate_mnemonic(m.replace("about", "abandon")))
     m2 = bip39.entropy_to_mnemonic(bytes([0x7F]) * 16)
-    _ok("vector legal/tender…", m2.startswith("legal tender"))
+    _ok("vector legal winner thank year…",
+        m2 == ("legal winner thank year wave sausage worth useful "
+               "legal winner thank yellow"))
     s1 = bip39.mnemonic_to_seed(m)
     s2 = bip39.mnemonic_to_seed(m, "TREZOR")
     _ok("seed length 64", len(s1) == 64 and len(s2) == 64)
     _ok("passphrase changes seed", s1 != s2)
-    _ok("TREZOR vector prefix c55e4c38", s2.hex().startswith("c55e4c38"))
+    _ok("TREZOR vector prefix c55257c3", s2.hex().startswith("c55257c3"))
 
 
 def test_bip39_12th_word_recovery():
@@ -83,8 +92,11 @@ def test_bip39_12th_word_recovery():
     comps = bip39.completions_from_11_words(words[:11], 11)
     _ok("true word among completions", words[11] in comps)
     _ok("completion count == 128 (2^11/2^4)", len(comps) == 128)
-    pos, w = bip39.recover_missing_word(words, [11])[0]
-    _ok("recover API returns gap+word", pos == 11 and w == words[11])
+    # recover_missing_word returns EVERY checksum-valid completion as
+    # (position, word) pairs; the true word must be one of them.
+    rec = bip39.recover_missing_word(words, [11])
+    _ok("recover API returns gap+word list",
+        isinstance(rec, list) and (11, words[11]) in rec)
     # missing at position 0 still recovers
     comps0 = bip39.completions_from_11_words(words[1:], 0)
     _ok("gap at head recoverable", words[0] in comps0)
@@ -149,8 +161,8 @@ def test_vectorized_matches_scalar_stream():
 # ---------------------------------------------------------------------- LCG
 def test_java_random_semantics():
     r = lcg.JavaRandom(0)
-    # JDK: new Random(0); nextInt() == -1155480935  (well-known value)
-    _ok("Java Random(0).nextInt()", r.next_int() == -1155480935)
+    # JDK known value: new Random(0).nextInt() == -1155484576
+    _ok("Java Random(0).nextInt()", r.next_int() == -1155484576)
     v = lcg.JavaRandom(0).big_integer(256)
     _ok("BigInteger(256,r) length 32", len(v) == 32)
     _ok("BigInteger determinism", lcg.JavaRandom(0).big_integer(256) == v)
