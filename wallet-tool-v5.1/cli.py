@@ -130,12 +130,20 @@ def cmd_scan(args):
         if now - last[0] >= 1.0:
             last[0] = now
             eta = st.eta_s(cfg)
+            # V5.1.2: hide the rate until ≥0.1 s of real compute is measured;
+            # in --balance public mode the early numbers were dominated by
+            # network stalls and read as a bogus 0/s (or absurd huge values).
+            rate_txt = (f"rate={st.rate():,.0f}/s" if st.elapsed >= 0.1
+                        else "rate=n/a")
+            probe_txt = (f" net-wait={st.probe_wait:.1f}s"
+                         if st.probe_wait >= 1.0 else "")
             print(f"[{now - t0:7.1f}s] cand={st.candidates:>12,} "
                   f"addr={st.addresses_derived:>12,} "
                   f"bloom-skip={st.bloom_skips:>12,} "
                   f"probes={st.network_probes:>8,} hits={st.hits} "
-                  f"rate={st.rate():,.0f}/s"
-                  + (f" eta={eta/60:.1f}m" if eta else ""),
+                  f"{rate_txt}"
+                  + (f" eta={eta/60:.1f}m" if eta else "")
+                  + probe_txt,
                   flush=True)
             write_progress(engine)
 
@@ -190,11 +198,18 @@ def cmd_status(_args):
         print("no scan recorded yet"); return 1
     with open(PROGRESS_FILE) as fh:
         j = json.load(fh)
-    # V5.1.1: normalize stats for display (rate/elapsed were the buggy pair).
+    # V5.1.2: `elapsed` is pure sweep-compute time (probe stalls are tracked
+    # separately in `probe_wait`), so the engine's own rate is authoritative.
     cand = int(j.get("candidates", 0))
     work_s = float(j.get("elapsed", 0.0))
-    rate = cand / max(work_s, 1e-9)
-    j["rate"] = rate
+    if work_s < 0.1:
+        # too little compute measured yet — a rate here would be meaningless
+        # (and historically produced absurd values like 13e9/s). Show n/a.
+        j["rate"] = None
+        j["rate_display"] = "n/a (<0.1s of work)"
+    else:
+        j["rate"] = cand / work_s
+        j["rate_display"] = f"{j['rate']:,.0f}/s"
     j["elapsed"] = work_s
     for k, v in j.items():
         if isinstance(v, float):
@@ -345,6 +360,60 @@ def cmd_selftest(args):
     assert eng4.cfg.vuln == "lcg" and eng4.cfg.lcg_variant == "msvc_mod"
     print("[selftest] RNG fingerprint auto-configured engine → "
           "lcg/msvc_mod. PASS ✔")
+
+    # ---- V5.1.2 lane D: mt19937 seed-range + honest online-mode stats ----
+    import fast_mt as _fmt
+    import mt19937 as _mt
+    from balance import Backend as _Be, BalanceResult as _Br
+    lo, hi = 10_000_000, 10_000_064            # 64 seeds — small & exact
+    seed_true = 10_000_033
+    ent_d = _mt.ref_entropy_buffer(seed_true)
+    k_d = int.from_bytes(ent_d, "big") % ecc.CURVE_ORDER
+    priv_d = k_d.to_bytes(32, "big")
+    planted_d = hd.direct_keys(priv_d, ("btc",))[0]
+
+    class SlowProbeBackend(_Be):
+        """Simulates a public explorer: ~12 ms HTTP stall per probe."""
+        name = "selftest-slow-probe"
+        def balance(self, address, chain_tag="btc"):
+            time.sleep(0.012)
+            if address == planted_d.address:
+                return _Br(address, chain_tag, 5000, 0, 3, self.name)
+            return _Br(address, chain_tag, 0, 0, 0, self.name)
+
+    # V5.1.2 lane D: watch=None → no bloom gate, so ALL 64 candidate
+    # addresses reach the slow backend (64 probes × 12 ms ≈ 0.77 s of network
+    # stall) and the rate-quarantine is genuinely exercised. Funding truth is
+    # enforced by min_sat=5000 + the planted address instead.
+    ck_d = BalanceChecker(mode="local", watchlist=None,
+                          backends={"btc": SlowProbeBackend()},
+                          require_watch_hit=False)
+    cfg_d = ScanConfig(vuln="mt19937", mode="direct", coins=("btc",),
+                       batch=16, mt_seed_lo=lo, mt_seed_hi=hi, min_sat=5000)
+    eng_d = ScanEngine(cfg_d, ck_d)
+    eng_d.start(); eng_d.join(timeout=60)
+    assert eng_d.stats.candidates == hi - lo, \
+        f"seed range must sweep exactly {hi - lo} candidates, got " \
+        f"{eng_d.stats.candidates}"
+    assert any(f.address == planted_d.address for f in eng_d.findings), \
+        "mt19937 seed-range lane failed to recover the planted wallet"
+    st_d = eng_d.stats
+    # window log line must speak SEEDS, not an empty time window
+    assert "seeds=[10000000 .. 10000064)" in eng_d._mt_window_desc(), \
+        eng_d._mt_window_desc()
+    # rate honesty: ≥64 probes × 12 ms ≈ 0.77 s of network stall must NOT
+    # pollute elapsed; cand/elapsed stays in a plausible compute band.
+    assert st_d.network_probes >= 1, "probe counter never moved"
+    assert st_d.probe_wait >= 0.3, \
+        f"network stall not measured: {st_d.probe_wait}"
+    r_d = st_d.rate()
+    assert 10 <= r_d <= 1e8, f"implausible rate after fix: {r_d:,.0f}/s"
+    assert abs(r_d - st_d.candidates / max(st_d.elapsed, 1e-9)) < 1e-6
+    pct_d = st_d.percent(cfg_d)
+    assert pct_d is not None and abs(pct_d - 1.0) < 1e-9, pct_d
+    print(f"[selftest] mt19937 seed-range: {st_d.candidates} cands, "
+          f"{st_d.network_probes} slow probes, net-wait={st_d.probe_wait:.2f}s "
+          f"excluded → rate={r_d:,.0f}/s (not 0). PASS ✔")
     return 0
 
 

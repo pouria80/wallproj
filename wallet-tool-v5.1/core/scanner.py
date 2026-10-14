@@ -119,6 +119,7 @@ class ScanConfig:
 class ScanStats:
     started: float = 0.0            # wall-clock epoch of start()
     elapsed: float = 0.0            # sweep WORK time (monotonic seconds)
+    probe_wait: float = 0.0         # network stall inside balance probes
     candidates: int = 0
     addresses_derived: int = 0
     bloom_skips: int = 0
@@ -132,11 +133,14 @@ class ScanStats:
     cursor_ms: int = 0              # last swept timestamp (randstorm/lcg)
 
     def rate(self) -> float:
-        """Candidates/second over actual sweep work time only.
+        """Candidates/second over actual sweep compute time only.
 
-        V5.1 fix: previously derived from `elapsed`, which included engine
-        startup and gaps between sweeps — the displayed rate collapsed to
-        ~0 whenever a scan idled before/at the progress tick.
+        V5.1.2 fix: in ``--balance public`` mode every network probe could
+        block up to its HTTP timeout (~10 s).  That wall-clock wait used to
+        land inside ``elapsed``, inflating the denominator so the displayed
+        rate collapsed to 0/s even though candidates were counted correctly.
+        Network/probe stall time is now tracked separately (``probe_wait``)
+        and excluded; ``elapsed`` stays pure sweep-compute time.
         """
         e = max(self.elapsed, 1e-9)
         return self.candidates / e
@@ -198,7 +202,9 @@ class ScanEngine:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._work_s = 0.0                      # accumulated sweep time
+        self._probe_s = 0.0                     # accumulated network stall
         self._run_t0 = time.monotonic()         # set again in _run()
+        self._probe_wall = 0.0                  # monotonic t0 of active probe
         self.on_hit = None                    # callback(Finding) — GUI hook
         self.on_progress = None               # callback(ScanStats)
 
@@ -236,7 +242,7 @@ class ScanEngine:
 
     # -- main loop ---------------------------------------------------------
     def _run(self) -> None:
-        w0 = self._run_t0 = time.monotonic()
+        self._run_t0 = time.monotonic()         # fresh baseline (V5.1.2)
         try:
             self.stats.reduced_coverage = not self.prune_plan.lossless
             self.stats.coverage_keeps = self.prune_plan.total_keeps
@@ -259,14 +265,45 @@ class ScanEngine:
                 raise ValueError(f"unknown vuln {self.cfg.vuln!r}")
             self.stats.finished = not self.stats.stopped
         finally:
-            self._work_s += time.monotonic() - w0
-            self.stats.elapsed = self._work_s
+            self._end_probe()                   # close any open probe window
+            self.stats.elapsed = (time.monotonic() - self._run_t0) - self._probe_s
+            self.stats.probe_wait = self._probe_s
+            # V5.1.2: park the cursor at the END of the space on a clean
+            # finish — percent() reads `cursor`, and a half-open range made
+            # completed scans report 98.4% forever.
+            if not self.stats.stopped:
+                c = self.cfg
+                if c.vuln == "mt19937" and c.mt_seed_hi > c.mt_seed_lo:
+                    self.stats.cursor_ms = c.mt_seed_hi
+                elif c.t_stop_ms > c.t_start_ms:
+                    self.stats.cursor_ms = c.t_stop_ms
+
+    def _begin_probe(self) -> None:
+        """Mark the start of a potentially-blocking balance check.
+
+        V5.1.2: network stall time is quarantined from the compute clock so
+        `rate()` never collapses to 0/s in --balance public mode.
+        """
+        if self._probe_wall == 0.0:
+            self._probe_wall = time.monotonic()
+
+    def _end_probe(self) -> None:
+        if self._probe_wall != 0.0:
+            self._probe_s += time.monotonic() - self._probe_wall
+            self._probe_wall = 0.0
 
     def _progress(self, cursor: int) -> None:
         """Report live stats at sweep boundaries (V5.1: was never called
         mid-sweep, so status showed elapsed=0.0 and rate=0 forever)."""
         self.stats.cursor_ms = cursor
-        self.stats.elapsed = self._work_s + (time.monotonic() - self._run_t0)
+        # live compute time = wall since run start − accumulated probe stalls
+        # (− the currently-open probe window, if any).
+        stall = self._probe_s
+        if self._probe_wall != 0.0:
+            stall += time.monotonic() - self._probe_wall
+        self.stats.elapsed = max(
+            (time.monotonic() - self._run_t0) - stall, 1e-9)
+        self.stats.probe_wait = stall
         if self.on_progress:
             self.on_progress(self.stats)
 
@@ -470,7 +507,13 @@ class ScanEngine:
     def _check_keys(self, keys: List[hd.DerivedKey], base: Finding) -> None:
         self.stats.addresses_derived += len(keys)
         pairs = [(k.chain_tag, k.address) for k in keys]
-        res_list = self.checker.check_many(pairs)
+        # V5.1.2: balance probes (esp. --balance public HTTP calls) are NOT
+        # sweep compute — quarantine their wall time from rate()/elapsed.
+        self._begin_probe()
+        try:
+            res_list = self.checker.check_many(pairs)
+        finally:
+            self._end_probe()
         hit_addrs = {r.address: r for r in res_list}
         for k in keys:
             r = hit_addrs.get(k.address)

@@ -106,8 +106,11 @@ async function refresh() {
     statCard("رد محدودیت", nf.format(st.constraint_rejects || 0)),
     statCard("پروب شبکه", nf.format(st.network_probes)),
     statCard("یافته", nf.format(st.hits)),
-    statCard("نرخ /s", nf.format(Math.round(st.rate || 0))),
+    // V5.1.2: rate is null until ≥0.1s of real compute measured (network
+    // probe stalls no longer pollute it) — show n/a instead of a bogus 0/s.
+    statCard("نرخ /s", st.rate == null ? "n/a" : nf.format(Math.round(st.rate))),
     statCard("زمان (s)", (st.elapsed || 0).toFixed(1)),
+    statCard("انتظار شبکه", st.probe_wait ? st.probe_wait.toFixed(1) + "s" : "—"),
     statCard("پیشرفت", pct == null ? "—"
       : nf.format(Math.round(pct * 1000) / 10) + "٪"),
     statCard("ETA", etaTxt),

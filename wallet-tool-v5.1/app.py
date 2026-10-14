@@ -174,13 +174,14 @@ class Handler(BaseHTTPRequestHandler):
                                    "findings": [], "logs": _logs[-40:],
                                    "note": "no scan started"})
             st = eng.stats
-            # V5.1: `elapsed` is maintained by the engine itself (monotonic
-            # sweep time) — no wall-clock overwrite here anymore, which used
-            # to produce the bogus "elapsed: 0.0" / rate collapse.
+            # V5.1.2: `elapsed` is pure sweep-compute time maintained by the
+            # engine (probe network stalls are quarantined into `probe_wait`).
+            # rate=None until ≥0.1s of real work measured — GUI shows "n/a".
             return self._json({
                 "running": eng.running,
                 "config": {k: v for k, v in eng.cfg.__dict__.items()},
-                "stats": {**st.__dict__, "rate": st.rate(),
+                "stats": {**st.__dict__,
+                          "rate": (st.rate() if st.elapsed >= 0.1 else None),
                           "percent": st.percent(eng.cfg),
                           "eta_s": st.eta_s(eng.cfg)},
                 "coverage_note": eng.stats_extra_note,
