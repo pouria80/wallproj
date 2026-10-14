@@ -1,0 +1,3 @@
+# پیش‌نیاز wallet-tool v5.1  (نصب: pip install -r requirements.txt)
+numpy>=1.24
+# cupy-cuda12x  # اختیاری: فقط برای شتاب GPU (در حالت CPU لازم نیست)

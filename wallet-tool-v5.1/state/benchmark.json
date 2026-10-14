@@ -1,0 +1,41 @@
+{
+  "results": [
+    {
+      "lane": "randstorm/mwc1616",
+      "candidates": 60000,
+      "seconds": 0.036,
+      "cand_per_s": 1665906.2
+    },
+    {
+      "lane": "lcg/java",
+      "candidates": 60000,
+      "seconds": 0.2959,
+      "cand_per_s": 202759.7
+    },
+    {
+      "lane": "lcg/msvc_mod",
+      "candidates": 60000,
+      "seconds": 0.8119,
+      "cand_per_s": 73903.9
+    },
+    {
+      "lane": "lcg/msvc_top",
+      "candidates": 60000,
+      "seconds": 0.53,
+      "cand_per_s": 113211.8
+    },
+    {
+      "lane": "lcg/nr",
+      "candidates": 60000,
+      "seconds": 0.2923,
+      "cand_per_s": 205259.3
+    },
+    {
+      "lane": "mt19937/numpy-vector",
+      "candidates": 65536,
+      "seconds": 0.0607,
+      "cand_per_s": 1079711.3
+    }
+  ],
+  "gpu_available": false
+}
