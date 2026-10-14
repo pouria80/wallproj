@@ -98,6 +98,13 @@ def cmd_scan(args):
         styles=tuple(args.styles.split(",")) if args.styles else None,
         naddr=args.naddr, batch=args.batch,
         max_candidates=args.max_candidates, stop_on_hit=args.stop_on_hit,
+        known_phrase=args.known_phrase,
+        buckets=(tuple(int(x, 16) for x in
+                       args.buckets.replace(",", " ").split())
+                 if args.buckets else None),
+        parity=args.parity, min_sat=args.min_sat,
+        auto_fingerprint=args.auto_fingerprint,
+        fingerprint_sample_hex=args.fp_sample,
     )
     checker = make_checker(args)
     engine = ScanEngine(cfg, checker)
@@ -258,6 +265,68 @@ def cmd_selftest(args):
     eng2._probe_direct(entropy, 0, "randstorm/mwc1616")
     assert any(x.address == planted.address for x in eng2.findings)
     print("[selftest] ScanEngine offline mode hit exactly one wallet. PASS ✔")
+
+    # ---- V5.1 lane B: missing-word constraint end-to-end ---------------
+    import bip39 as _b
+    import constraints as _cons
+    ent_true = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
+    words = _b.entropy_to_mnemonic(ent_true).split()
+    gap = 5
+    known = [w for i, w in enumerate(words) if i != gap]
+    phrase_in = " ".join(known[:gap] + ["?"] + known[gap:])
+    mc = _cons.MissingWordConstraint(known, (gap,))
+    sols = list(mc.generate())
+    assert len(sols) < 2048, "constraint solver must prune below full 2048"
+    assert ent_true in sols, \
+        f"missing-word solver lost the truth ({len(sols)} survivors)"
+    seed = _b.mnemonic_to_seed(_b.entropy_to_mnemonic(ent_true))
+    priv_true = hd.derive_priv(seed, "m/44'/0'/0'/0/0")
+    addr_true = hd.p2pkh_address(ecc.compressed_pub(priv_true),
+                                 hd.CHAINS["btc"])
+    wl3 = Watchlist.from_iterable([addr_true])
+    ck3 = BalanceChecker(mode="offline", watchlist=wl3)
+    cfg3 = ScanConfig(vuln="randstorm", mode="bip39", coins=("btc",),
+                      naddr=1, batch=128, max_candidates=4096,
+                      stop_on_hit=True, known_phrase=phrase_in)
+    eng3 = ScanEngine(cfg3, ck3)
+    eng3.start(); eng3.join(timeout=120)
+    assert any(f.address == addr_true for f in eng3.findings), \
+        "missing-word lane failed to recover the planted wallet (lane B)"
+    print(f"[selftest] missing-word constraint: {len(sols)} survivors "
+          f"(of 2048 raw), scanner recovered exact wallet. PASS ✔")
+
+    # ---- V5.1 lane C: fingerprint auto-classification ------------------
+    import fingerprint as _fp
+    # msvc_mod structural proof: rand() ≤ 32767 ⇒ `rand()%256` can NEVER
+    # emit a byte ≥ 128 — generate the buffer directly (bytes, not tuple).
+    msvc_buf = bytes(b % 256 for b in
+                     [0x1A2B, 0x3C4D, 0x0F1E, 0x2A3B, 0x4C5D, 0x0E1F,
+                      0x1B2C, 0x3D4E, 0x0A1B, 0x2C3D, 0x4E5F, 0x0B1C,
+                      0x1D2E, 0x3F40, 0x0C1D, 0x2D3E])
+    assert max(msvc_buf) < 128
+    rep = _fp.classify_stream(msvc_buf)
+    assert rep.best and rep.best.family == "lcg/msvc_mod", \
+        f"fingerprint mis-ranked: {rep.as_dict()}"
+    vuln_sel, var_sel = _fp.family_to_scan_args(rep.best.family)
+    assert (vuln_sel, var_sel) == ("lcg", "msvc_mod")
+    cfg4 = ScanConfig(auto_fingerprint=True,
+                      fingerprint_sample_hex=msvc_buf.hex())
+    eng4 = ScanEngine(cfg4, BalanceChecker(mode="offline"))
+    assert eng4.cfg.vuln == "lcg" and eng4.cfg.lcg_variant == "msvc_mod"
+    print("[selftest] RNG fingerprint auto-configured engine → "
+          "lcg/msvc_mod. PASS ✔")
+    return 0
+
+
+def cmd_fingerprint(args):
+    import fingerprint as fpmod
+    buf = bytes.fromhex(args.sample_hex.strip())
+    rep = fpmod.classify_stream(buf)
+    print(json.dumps(rep.as_dict(), indent=2, ensure_ascii=False))
+    if rep.best:
+        vuln, variant = fpmod.family_to_scan_args(rep.best.family)
+        print(f"\nrecommended: --vuln {vuln}"
+              + (f" --lcg-variant {variant}" if variant else ""))
     return 0
 
 
@@ -289,6 +358,15 @@ def build_parser():
     s.add_argument("--watchlist", default="", help="txt of funded addresses")
     s.add_argument("--stop-on-hit", action="store_true")
     s.add_argument("--show-secrets", action="store_true")
+    s.add_argument("--known-phrase", default="",
+                   help='12 words with "?" gaps, e.g. "abandon ? abandon ..."')
+    s.add_argument("--buckets", default="",
+                   help="REDUCED coverage: keep entropy buckets csv 0-f")
+    s.add_argument("--parity", type=int, default=None, choices=[0, 1])
+    s.add_argument("--min-sat", type=int, default=1)
+    s.add_argument("--auto-fingerprint", action="store_true",
+                   help="classify --fp-sample and auto-pick vuln/variant")
+    s.add_argument("--fp-sample", default="", help="hex sample of RNG bytes")
     s.set_defaults(fn=cmd_scan)
 
     t = sub.add_parser("status", help="show last scan progress")
@@ -300,6 +378,11 @@ def build_parser():
 
     st = sub.add_parser("selftest", help="offline end-to-end pipeline proof")
     st.set_defaults(fn=cmd_selftest)
+
+    fp = sub.add_parser("fingerprint",
+                        help="classify an RNG byte sample (hex)")
+    fp.add_argument("sample_hex")
+    fp.set_defaults(fn=cmd_fingerprint)
     return p
 
 

