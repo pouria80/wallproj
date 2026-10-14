@@ -90,7 +90,9 @@ CHAINS: Dict[str, Chain] = {
     "btc":  Chain("BTC",  0x00, 0x05, "bc",  0x80),
     "ltc":  Chain("LTC",  0x30, 0x32, "ltc", 0xB0),
     "doge": Chain("DOGE", 0x1E, 0x16, None,  0x9E),
-    "zec":  Chain("ZEC",  0x1CAB, 0x1C7D, None, 0x80),   # t1pub/t1addr prefixes
+    # Zcash t-addr prefixes are TWO bytes: t1pubkeyID = 0x1CBA, t1scriptID =
+    # 0x1CBD (mainnet).  Verified against reference wallet vectors.
+    "zec":  Chain("ZEC",  0x1CBA, 0x1CBD, None, 0x80),
 }
 
 # Historical derivation paths (label -> path template)
@@ -109,6 +111,72 @@ LEGACY_PATHS: Dict[str, Dict[str, str]] = {
     "doge": {"bip44": "m/44'/3'/0'/0/0", "bitcoincore_old": "m/0'/0/0"},
     "zec": {"bip32_legacy": "m/0'/0/0"},
 }
+
+# --------------------------------------------------------------------------
+# FULL historical path families (V5.1) — every label expands to a list of
+# concrete BIP-32 paths the scanner probes ("مشتقات" of each wallet style).
+#
+#   * Bitcoin Core pre-BIP44 released keys under m/0'/i'  (i = keypool idx);
+#     the widely-emulated first receiving address is m/0'/0/0.
+#   * Electrum v1 (1.0-2.x, PKE): xpub at m/0'; receive chain = m/0'/i/0,
+#     change chain = m/0'/i/1  (i = address index).
+#   * Blockchain.info (My Wallet legacy accounts): account k root is
+#     m/44'/0'/k'; receiving addr j = m/44'/0'/k'/0/j ; change = .../1/j.
+#   * MultiBit (deterministic wallets): master at m/0'/0'; receiving addr j
+#     = m/0'/0'/j (sequential, non-hardened leaf), change via m/1'/...
+#   * BIP-44/49/84 standard chains per coin type.
+# --------------------------------------------------------------------------
+
+COIN_TYPE = {"btc": 0, "ltc": 2, "doge": 3, "zec": 133}
+
+
+def _paths(purpose: int, coin: int, account: int, chains=(0,), naddr: int = 1,
+           hardened_leaf: bool = False) -> List[str]:
+    out = []
+    for c in chains:
+        for j in range(naddr):
+            leaf = f"{j}'" if hardened_leaf else str(j)
+            out.append(f"m/{purpose}'/{coin}'/{account}'/{c}/{leaf}")
+    return out
+
+
+def build_path_family(coin: str, naddr: int = 1, accounts: Tuple[int, ...] = (0,)
+                      ) -> Dict[str, List[str]]:
+    """All probeable legacy + standard paths for one chain."""
+    ct = COIN_TYPE[coin]
+    fam: Dict[str, List[str]] = {}
+    # ---- Electrum v1 (PKE): m/0'/i/0 receive, m/0'/i/1 change -------------
+    fam["electrum_v1"] = ([f"m/0'/{i}/{'0'}" for i in range(naddr)]
+                          + [f"m/0'/{i}/1" for i in range(naddr)])
+    # ---- Bitcoin Core old (pre-BIP44 keypool) ------------------------------
+    fam["bitcoincore_old"] = ["m/0'/0/0"] + \
+        [f"m/0'/{i}'" for i in range(1, naddr)]
+    # ---- Blockchain.info legacy accounts -----------------------------------
+    bc = []
+    for a in accounts:
+        bc += _paths(44, ct, a, chains=(0, 1), naddr=naddr)
+    fam["blockchain_info"] = bc
+    # ---- MultiBit deterministic: m/0'/0'/j ---------------------------------
+    mb = []
+    for a in accounts:
+        if a == 0:
+            # canonical historical form: account root hardened, leaf sequential
+            mb += [f"m/0'/0'/{j}" for j in range(naddr)]
+        else:
+            mb += [f"m/0'/0'/{a}'/{j}" for j in range(naddr)]
+    fam["multibit"] = mb or [f"m/0'/0'/{j}" for j in range(naddr)]
+    # ---- Standard BIP-32 raw key (some JS libs used m/0/0) -----------------
+    fam["bitcoinjs_shared"] = ["m/0'/0'", "m/0'/0'/0", "m/0/0"]
+    # ---- BIP-44 / 49 / 84 ---------------------------------------------------
+    fam["bip44"] = _paths(44, ct, 0, (0, 1), naddr)
+    if coin in ("btc", "ltc"):
+        fam["bip49"] = _paths(49, ct, 0, (0, 1), naddr)
+        fam["bip84"] = _paths(84, ct, 0, (0, 1), naddr)
+    return fam
+
+
+ALL_PATH_LABELS = ("electrum_v1", "bitcoincore_old", "blockchain_info",
+                   "multibit", "bitcoinjs_shared", "bip44", "bip49", "bip84")
 
 
 # ---------------------------------------------------------------- addresses
@@ -250,3 +318,93 @@ def address_set_from_mnemonic(mnemonic: str, passphrase: str = "",
     import bip39
     seed = bip39.mnemonic_to_seed(mnemonic, passphrase)
     return address_set_from_priv(derive_priv(seed, path))
+
+
+# ------------------------------------------------------- multi-path probing
+@dataclass
+class DerivedKey:
+    """One concrete (chain, wallet-style, path) key + its observable addr."""
+    chain_tag: str          # "btc" | "btc-uncomp" | "ltc" | "doge" | "zec" | …
+    address: str
+    style: str              # electrum_v1 / bitcoincore_old / blockchain_info /
+                            # multibit / bitcoinjs_shared / bip44 / direct
+    path: str               # concrete BIP-32 path ("-" for raw privkey)
+    priv_hex: str
+    compressed: bool
+
+
+def derive_keys_from_seed(seed: bytes, coins: Tuple[str, ...] = ("btc",),
+                          styles: Optional[Tuple[str, ...]] = None,
+                          naddr: int = 1) -> List[DerivedKey]:
+    """Every legacy-path receiving address derivable from a BIP-39 seed.
+
+    `styles` selects path families (default: ALL known historical ones).
+    Compressed AND uncompressed pubkeys are emitted for every leaf.
+    """
+    out: List[DerivedKey] = []
+    for coin in coins:
+        ch = CHAINS[coin]
+        fam = build_path_family(coin, naddr=naddr)
+        for style, paths in fam.items():
+            if styles and style not in styles:
+                continue
+            for p in paths:
+                try:
+                    priv = derive_priv(seed, p)
+                except ValueError:
+                    continue                     # rare invalid child
+                pc = ecc.compressed_pub(priv)
+                pu = ecc.pubkey_uncompressed(priv)
+                tag = f"{coin}:{style}"
+                out.append(DerivedKey(f"{coin}", p2pkh_address(pc, ch),
+                                      style, p, priv.hex(), True))
+                if coin == "btc":
+                    out.append(DerivedKey("btc-uncomp", p2pkh_address(pu, ch),
+                                          style, p, priv.hex(), False))
+                if ch.bech32_hrp and style.startswith("bip84"):
+                    out.append(DerivedKey(f"{coin}-bech32",
+                                          p2wpkh_segwit_address(pc, ch.bech32_hrp),
+                                          style, p, priv.hex(), True))
+                if style.startswith("bip49"):
+                    sh = p2sh_p2wpkh_address(pc, ch)
+                    if sh:
+                        out.append(DerivedKey(f"{coin}-p2sh", sh,
+                                              style, p, priv.hex(), True))
+    return out
+
+
+def derive_keys_from_entropy(entropy32: bytes, coins: Tuple[str, ...],
+                             styles: Optional[Tuple[str, ...]] = None,
+                             naddr: int = 1) -> List[DerivedKey]:
+    """Weak-RNG 32-byte buffer -> BIP-39 mnemonic -> seed -> all legacy paths."""
+    import bip39
+    mnemonic = bip39.entropy_to_mnemonic(entropy32[:16])
+    seed = bip39.mnemonic_to_seed(mnemonic)
+    keys = derive_keys_from_seed(seed, coins, styles, naddr)
+    for k in keys:
+        k.priv_hex = k.priv_hex          # keep; mnemonic recoverable upstream
+    return keys
+
+
+def direct_keys(priv: bytes, coins: Tuple[str, ...] = ("btc",)) -> List[DerivedKey]:
+    """Raw secp256k1 key (the actual Randstorm output) -> addresses per chain.
+
+    The 2011-2015 JSBN/BitcoinJS wallets stored the private key DIRECTLY —
+    no mnemonic at all.  Both compressed and uncompressed forms were used
+    interchangeably by senders, so both must be probed.
+    """
+    if not ecc.is_valid_priv(priv):
+        return []
+    out = []
+    pc, pu = ecc.compressed_pub(priv), ecc.pubkey_uncompressed(priv)
+    for coin in coins:
+        ch = CHAINS[coin]
+        out.append(DerivedKey(coin, p2pkh_address(pc, ch), "direct", "-",
+                              priv.hex(), True))
+        out.append(DerivedKey(f"{coin}-uncomp", p2pkh_address(pu, ch),
+                              "direct", "-", priv.hex(), False))
+        if ch.bech32_hrp:
+            out.append(DerivedKey(f"{coin}-bech32",
+                                  p2wpkh_segwit_address(pc, ch.bech32_hrp),
+                                  "direct", "-", priv.hex(), True))
+    return out
