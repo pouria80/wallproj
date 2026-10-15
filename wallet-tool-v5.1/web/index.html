@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wallet Tool v5.1 — پنل مدیریت اسکن</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>🔬 Wallet Tool <span class="v">v5.1</span></h1>
+  <div class="sub">موتور اسکن RNG ضعیف · فقط loopback (127.0.0.1) · بررسی موجودی read-only</div>
+</header>
+
+<main>
+  <!-- ================= کنترل اسکن ================= -->
+  <section class="card">
+    <h2>کنترل اسکن</h2>
+    <div class="grid">
+      <label>آسیب‌پذیری
+        <select id="vuln">
+          <option value="randstorm">Randstorm / V8 MWC1616</option>
+          <option value="lcg">LCG (Java/MSVC/NR)</option>
+          <option value="mt19937">MT19937 (Trust Wallet)</option>
+        </select>
+      </label>
+      <label>حالت
+        <select id="mode">
+          <option value="direct">کلید مستقیم (direct)</option>
+          <option value="bip39">منمونیک BIP-39</option>
+        </select>
+      </label>
+      <label>variant LCG
+        <select id="lcg_variant">
+          <option value="java">java</option>
+          <option value="msvc_mod">msvc_mod</option>
+          <option value="msvc_top">msvc_top</option>
+          <option value="nr">nr</option>
+        </select>
+      </label>
+      <label>شروع (YYYY-MM-DD یا epoch-ms)
+        <input id="start" type="text" placeholder="2012-01-01">
+      </label>
+      <label>پایان
+        <input id="stop" type="text" placeholder="2012-01-02">
+      </label>
+      <label>stride (ms) <input id="stride" type="number" value="1" min="1"></label>
+      <label>batch (lanes) <input id="batch" type="number" value="4096" min="1"></label>
+      <label>سکه‌ها (csv) <input id="coins" type="text" value="btc"></label>
+      <label>استایل مسیرها (csv، خالی=همه)
+        <input id="styles" type="text" placeholder="electrum_v1,multibit">
+      </label>
+      <label>حداکثر کاندید <input id="max_candidates" type="number" value="200000" min="0"></label>
+      <label>حالت موجودی
+        <select id="balance">
+          <option value="offline">آفلاین (بدون شبکه)</option>
+          <option value="local">لوکال‌نود (127.0.0.1)</option>
+          <option value="public">عمومی (explorer GET)</option>
+        </select>
+      </label>
+      <label>مسیر watchlist <input id="watchlist_path" type="text" placeholder="state/funded.txt"></label>
+      <label class="chk"><input id="stop_on_hit" type="checkbox"> توقف در اولین یافت</label>
+      <label>آستانه گزارش (sat) <input id="min_sat" type="number" value="1" min="1"></label>
+    </div>
+
+    <fieldset>
+      <legend>کلمات گمشده (حل‌کننده محدودیت)</legend>
+      <input id="known_phrase" type="text" style="width:100%"
+             placeholder="abandon abandon ? abandon abandon abandon abandon abandon abandon abandon abandon about">
+      <small>جای «?» برای هر کلمه گمشده. با یک شکاف، فضای جستجو به ~۱۲۸ کاندید معتبر چک‌سام کاهش می‌یابد.</small>
+    </fieldset>
+
+    <fieldset>
+      <legend>انگشت‌نگاری RNG</legend>
+      <label class="chk"><input id="auto_fingerprint" type="checkbox">
+        شناسایی خودکار نوع RNG از نمونه و تنظیم موتور</label>
+      <input id="fingerprint_sample_hex" type="text" style="width:100%"
+             placeholder="hex نمونه بایت‌های RNG، مثلاً 0a1b2c…">
+      <button id="btn_fp" type="button">فقط طبقه‌بندی نمونه</button>
+      <pre id="fp_out" class="out"></pre>
+    </fieldset>
+
+    <fieldset>
+      <legend>پیش‌فیلتر هشداردار (پوشش کاهشی)</legend>
+      <label>buckets (0-f، csv) <input id="buckets" type="text" placeholder="خالی = همه"></label>
+      <label>parity
+        <select id="parity"><option value="">—</option><option value="0">زوج</option><option value="1">فرد</option></select>
+      </label>
+      <small class="warn">⚠ استفاده از این فیلترها پوشش را زیر ۱۰۰٪ می‌برد؛ اجرا در رابط «REDUCED» برچسب می‌خورد.</small>
+    </fieldset>
+
+    <div class="row">
+      <button id="btn_start" class="primary" type="button">▶ شروع اسکن</button>
+      <button id="btn_stop" class="danger" type="button" disabled>■ توقف</button>
+      <span id="badge" class="badge idle">آماده</span>
+      <span id="covnote" class="covnote"></span>
+    </div>
+  </section>
+
+  <!-- ================= وضعیت ================= -->
+  <section class="card">
+    <h2>وضعیت زنده</h2>
+    <div id="stats" class="stats">هنوز اسکنی شروع نشده.</div>
+    <div class="barwrap"><div id="bar" class="bar"></div></div>
+  </section>
+
+  <!-- ================= یافته‌ها ================= -->
+  <section class="card">
+    <h2>یافته‌ها <small>(بدون کلید خصوصی — عمداً حذف شده‌اند)</small></h2>
+    <table id="hits">
+      <thead><tr>
+        <th>منبع</th><th>زمان(ms)</th><th>زنجیره</th><th>استایل</th>
+        <th class="ltr">آدرس</th><th>موجودی(sat)</th><th>TX</th><th>بک‌اند</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <a id="dl" href="/api/download" download>⬇ دانلود hits_redacted.jsonl</a>
+  </section>
+
+  <!-- ================= لاگ ================= -->
+  <section class="card">
+    <h2>رویدادها</h2>
+    <pre id="logs" class="out"></pre>
+  </section>
+</main>
+
+<footer>research tooling — بازسازی تاریخی آسیب‌پذیری‌های RNG · هیچ عملیات امضا/ارسال تراکنشی وجود ندارد</footer>
+<script src="app.js"></script>
+</body>
+</html>
