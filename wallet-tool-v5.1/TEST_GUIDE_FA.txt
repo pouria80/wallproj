@@ -1,0 +1,177 @@
+================================================================================
+راهنمای تست wallet-tool v5.1 — تست در حالت‌های مختلف (فارسی)
+================================================================================
+همه فرمان‌ها را از داخل پوشه پروژه اجرا کنید:
+
+    cd wallet-tool-v5.1
+
+پیش‌نیاز: Python 3.10+ و numpy   (pip install -r requirements.txt)
+هیچ‌کدام از تست‌های زیر برای پاس شدن به اینترنت نیاز ندارند، مگر جایی که
+صریحاً "--balance public" نوشته شود.
+
+--------------------------------------------------------------------------------
+۰) یک‌بار اول: نصب و خودآزمون سراسری (SELFTEST)
+--------------------------------------------------------------------------------
+    python cli.py selftest
+
+انتظار: هفت خط PASS/OK در انتها، بدون traceback و بدون ترافیک شبکه:
+    [selftest] planted address: 1Kks... (btc)
+    [selftest] pipeline rediscovered it via bloom+checker ...
+    [selftest] bloom correctly short-circuits unknown addresses.
+    [selftest] BIP-39 12-word round-trip OK; gap-recovery found the word ...
+    [selftest] LCG time-seed reproducible (java variant, 2 buffers).
+    [selftest] ScanEngine offline mode hit exactly one wallet. PASS ✔
+    [selftest] missing-word constraint: ... PASS ✔
+    [selftest] RNG fingerprint auto-configured engine → lcg/msvc_mod. PASS ✔
+
+اگر خطای ModuleNotFoundError گرفتید → numpy نصب نشده است.
+
+--------------------------------------------------------------------------------
+۱) تست واحد (Known-Answer Vectors) — بدون pytest
+--------------------------------------------------------------------------------
+    python tests/test_v5.py            # یا: python -m pytest tests -q
+
+انتظار: "ALL TESTS PASSED" در خط آخر. این تست‌ها ecc/hd/bip39/mwc1616/lcg/mt
+را با بردارهای مرجع تأیید می‌کنند (priv=1 → 1BgGZ... ، abandon×11 about و...).
+
+--------------------------------------------------------------------------------
+۲) حالت A — جاروب Randstorm/MWC1616 آفلاین (مسیر اصلی، بدون شبکه)
+--------------------------------------------------------------------------------
+سناریو: پنجره ۱۰ دقیقه‌ای، فقط BTC، بالانس آفلاین (هر چیزی پیدا شد یعنی
+واچ‌لیست درست کار می‌کند؛ بدون واچ‌لیست = صفر finding و این صحیح است).
+
+    python cli.py scan --vuln randstorm --mode direct \
+        --start 2012-01-01T00:00 --stop 2012-01-01T00:10 \
+        --coins btc --balance offline --max-candidates 600000
+
+انتظار: پیشرفت هر ثانیه روی stderr (cand=… addr=… rate=…) و در پایان:
+    done: N candidates, 0 hits -> state/hits.jsonl
+
+تست مثبتِ واقعی (باید HIT بدهد):
+    a) با selftest یک آدرس کاشته‌شده تولید می‌شود؛ برای تمرین، آدرس دلخواه
+       خود را در فایل funded.txt بنویسید و:
+    python cli.py scan --vuln randstorm --mode direct \
+        --start 2012-01-01 --stop 2012-01-01T00:01 \
+        --watchlist funded.txt --balance offline --stop-on-hit
+
+بررسی وضعیت و یافته‌ها:
+    python cli.py status
+    python cli.py hits                  # بدون اسرار
+    python cli.py hits --show-secrets   # بعد از تایید YES کلید نشان می‌دهد
+
+--------------------------------------------------------------------------------
+۳) حالت B — حل‌کننده کلمه گمشده (constraints) — بدون RNG
+--------------------------------------------------------------------------------
+سناریو: عبارت ۱۲ کلمه‌ای BIP-39 که یک کلمه‌اش "?" است. موتور به‌جای جستجوی
+RNG، تمام تکمیل‌های معتبر چک‌سام را تحلیلی تولید می‌کند (~۲۰۴۸ → چند صد).
+
+تولید عبارت آزمایشی (۱۱ کلمه معلوم + ۱ جای خالی):
+    python - <<'EOF'
+    import sys; sys.path.insert(0,'core')
+    import bip39
+    ent = bytes.fromhex('000102030405060708090a0b0c0d0e0f')
+    w = bip39.entropy_to_mnemonic(ent).split()
+    gap = 5
+    known = [x for i,x in enumerate(w) if i!=gap]
+    print(' '.join(known[:gap] + ['?'] + known[gap:]))
+    EOF
+
+خروجی را در PHRASE بگیرید و:
+    python cli.py scan --vuln randstorm --mode bip39 \
+        --known-phrase "$PHRASE" --balance offline --max-candidates 4096
+
+انتظار: اتمام ظرف چند ثانیه؛ اگر آدرس مقصد در واچ‌لیست باشد → HIT.
+نکته: اگر جای "?" تعداد کلمات ۱۲ نشود، CLI با پیام config خطا می‌دهد (طراحی).
+
+--------------------------------------------------------------------------------
+۴) حالت C — انگشت‌نگاری RNG (fingerprint) و تنظیم خودکار
+--------------------------------------------------------------------------------
+گام ۱: طبقه‌بندی یک نمونه hex از بایت‌های خروجی RNG ضعیف:
+    python cli.py fingerprint 1a3c0f2a4d0e1b3d0a2c4e0b1d3f0c2d
+
+انتظار: JSON با رتبه‌بندی خانواده‌ها و در انتها:
+    recommended: --vuln lcg --lcg-variant msvc_mod
+
+گام ۲: همان نمونه را به موتور بدهید تا خودش را خودکار پیکربندی کند:
+    python cli.py scan --auto-fingerprint --fp-sample 1a3c0f2a4d0e... \
+        --start 2012-01-01 --stop 2012-01-01T00:01 --balance offline
+
+انتظار: در سرخطِ stderr بنویسد vuln=lcg (نه randstorm پیش‌فرض) — یعنی
+انگشت‌نگاری فضای جستجو را عوض کرده است.
+
+گام ۳: جاروب MT19937 با بازه seed صریح (قابلیت جدید v5.1):
+    python cli.py scan --vuln mt19937 --mt-seed-lo 0 --mt-seed-hi 50000 \
+        --balance offline
+
+انتظار: بدون --start/--stop اجرا شود و cand=50000 تمام کند.
+اعتبارسنجی منفی (باید خطای روشن بدهد، نه اجرای بی‌صدا):
+    python cli.py scan --vuln randstorm --start 2012-01-02 --stop 2012-01-01
+    → error: --stop must be after --start
+
+--------------------------------------------------------------------------------
+۵) حالت D — وب ادمین روی 127.0.0.1 (REST + داشبورد فارسی)
+--------------------------------------------------------------------------------
+    python app.py 8777 &
+    curl -s http://127.0.0.1:8777/api/status | python -m json.tool
+    curl -s -X POST http://127.0.0.1:8777/api/start -d '{
+        "vuln":"randstorm","mode":"direct",
+        "start":"2012-01-01T00:00","stop":"2012-01-01T00:01",
+        "coins":"btc","balance":"offline","max_candidates":60000}'
+    curl -s http://127.0.0.1:8777/api/hits
+    curl -s -X POST http://127.0.0.1:8777/api/stop
+    curl -s http://127.0.0.1:8777/api/fingerprint \
+        -d '{"sample_hex":"1a3c0f2a4d0e1b3d0a2c4e0b1d3f0c2d"}'
+
+انتظار:
+  * /api/start → {"ok": true} ; /api/status → running=true و شمارنده cand
+  * /api/start با پنجره خالی → HTTP 400 و {"error": "empty window..."} ★جدید
+  * /api/start دوباره هنگام اجرا → HTTP 409 ("scan already running")
+  * مرورگر: http://127.0.0.1:8777 → داشبورد RTL، دکمه شروع/توقف، لاگ زنده
+  * امنیت: در هیچ پاسخ HTTP فیلد priv_hex/mnemonic وجود ندارد (چک کنید).
+
+بستن: kill %1  یا Ctrl+C
+
+--------------------------------------------------------------------------------
+۶) حالت E — بالانس آنلاین (BTC + آلت‌کوین‌ها) — نیازمند اینترنت
+--------------------------------------------------------------------------------
+فقط با واچ‌لیست استفاده کنید تا بلوم، ترافیک را near-zero نگه دارد:
+
+    echo "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH" > watch.txt
+    python cli.py scan --vuln randstorm --mode direct \
+        --start 2012-01-01 --stop 2012-01-01T00:05 \
+        --watchlist watch.txt --balance public --max-candidates 300000
+
+انتظار: probes بسیار کم (بلوم بقیه را رد می‌کند)؛ اگر آدرس واقعاً موجودی داشت
+HIT با backend=blockstream ثبت می‌شود.
+
+آلت‌کوین‌ها (پیش‌تنظیم‌های v5 در balance.py): dash / bch / eth / trx / xvg
+  * نحوه افزودن دستی در کد:
+        from balance import BalanceChecker
+        ck = BalanceChecker(mode="public", altcoin_presets=True)
+        r = ck.check("eth", "0x...")     # GET-only، بدون ساخت تراکنش
+  * تست سلامت APIها (بدون اسکن):
+        python - <<'EOF'
+        import sys; sys.path.insert(0,'core')
+        from balance import ALTCOIN_PRESETS, BalanceChecker
+        print(sorted(ALTCOIN_PRESETS))
+        ck = BalanceChecker(mode="public")
+        print(sorted(ck.backends))
+        EOF
+    انتظار: لیست کامل preset‌ها چاپ شود و هیچ exception ندهد.
+  * رفع باگ v5.1: ETH دیگرwei بزرگ را float نمی‌کند (Blockscout عدد اعشاری
+    برمی‌گرداند). اگر از Etherscan استفاده می‌کنید کلید را خودتان pass کنید.
+
+--------------------------------------------------------------------------------
+۷) چک‌لیست عیب‌یابی سریع
+--------------------------------------------------------------------------------
+* "No module named 'numpy'"            → pip install numpy
+* اسکن فوراً تمام می‌شود و cand=0      → پنجره زمانی خالی است؛ start<stop را
+                                          بررسی کنید (v5.1 خطای روشن می‌دهد)
+* HIT نمی‌گیرید با واچ‌لیست            → آدرس را در network درست وارد کرده‌اید؟
+                                          (--coins باید با chain آدرس بخواند)
+* --show-secrets سوال YES نمی‌پرسد     → خارج از TTY اجرا می‌کنید (pipe);
+                                          مقداردهی امنیتی فقط در ترمینال فعال است
+* وب باز نمی‌شود                       → پورت اشغال است: python app.py 8888
+* latency بالا در public               → explorer عمومی throttle می‌کند؛
+                                          از --balance local (Electrs لوکال) استفاده کنید
+================================================================================
