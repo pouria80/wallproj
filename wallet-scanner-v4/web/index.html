@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>اسکنر کیف‌پول V4 — بازتولید ضعف RNG تراست‌والیت (CVE-2023-31290)</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>🔬 اسکنر کیف‌پول نسخه ۴ <span class="badge">پژوهشی / شبیه‌سازی</span></h1>
+  <p class="sub">جست‌وجوی کامل موازی فضای بذر <code>[0 … 2³²−1]</code> موتور MT19937 آسیب‌پذیر افزونه مرورگر Trust Wallet — پوشش ۱۰۰٪ با چک‌پوینت پایدار</p>
+</header>
+
+<main>
+  <!-- ================= progress panel ================= -->
+  <section class="card wide">
+    <div class="row between">
+      <h2>وضعیت جست‌وجو</h2>
+      <div id="state-pill" class="pill idle">متوقف</div>
+    </div>
+    <div class="bar-wrap"><div id="bar" class="bar"></div><span id="pct" class="bar-label">۰٪</span></div>
+    <div class="row between"><span id="coverage-badge" class="cov full">پوشش: FULL 100%</span><span id="engine-mode" class="muted ltr"></span></div>
+    <div class="stats">
+      <div><label>بذرهای اسکن‌شده</label><b id="st-scanned">۰</b></div>
+      <div><label>محدوده فعلی (cursor)</label><b id="st-cursor">۰</b></div>
+      <div><label>کیف‌پول‌های مشتق‌شده</label><b id="st-derived">۰</b></div>
+      <div><label>نرخ (بذر/ثانیه)</label><b id="st-rate">—</b></div>
+      <div><label>زمان سپری‌شده</label><b id="st-elapsed">—</b></div>
+      <div><label>زمان تا پایان (ETA)</label><b id="st-eta">—</b></div>
+      <div><label>بررسی موجودی</label><b id="st-bal">۰</b> <small>(در صف: <span id="st-pending">۰</span>)</small></div>
+      <div><label>خطاها</label><b id="st-errors">۰</b></div>
+    </div>
+    <canvas id="rate-chart" height="90"></canvas>
+    <div id="last-error" class="errline"></div>
+  </section>
+
+  <!-- ================= controls ================= -->
+  <section class="card">
+    <h2>پیکربندی و کنترل</h2>
+    <div class="form">
+      <div><label>بذر شروع</label><input id="in-start" type="number" min="0" max="4294967295" value="0"></div>
+      <div><label>بذر پایان</label><input id="in-end" type="number" min="0" max="4294967295" value="4294967295"></div>
+      <div><label>تعداد پروسه‌ها</label><input id="in-workers" type="number" min="1" max="16" value="4"></div>
+      <div><label>اندازه چانک</label><input id="in-chunk" type="number" min="1000" step="1000" value="20000"></div>
+      <div><label>آستانه ETH</label><input id="in-theth" type="number" min="0" step="0.001" value="0"></div>
+      <div><label>آستانه USDT/USDC</label><input id="in-thusd" type="number" min="0" step="1" value="0"></div>
+      <div class="check"><label><input id="in-live" type="checkbox"> اتصال زنده به RPC (خاموش = فقط مشتق‌سازی، حالت شبیه‌سازی آموزشی — موجودی روی همه ۸ شبکه: ETH/ERC-20، BNB، Polygon، Arbitrum، Optimism، Base، Avalanche، Tron بررسی می‌شود)</label></div>
+      <div><label>موتور انگشت‌نگاری — سطل‌های مجاز (اختیاری)</label><input id="in-prune" type="text" placeholder="مثلاً 0,1,2 — خالی = پوشش کامل" dir="ltr"></div>
+      <div><label>فیلتر زوج/فرد بایت اول آنتروپی</label><select id="in-parity"><option value="">بدون فیلتر (پوشش کامل)</option><option value="even">فقط زوج</option><option value="odd">فقط فرد</option></select></div>
+      <div><label>بودجه CPU (٪)</label><input id="in-budget" type="number" min="5" max="100" step="5" value="35"></div>
+    </div>
+    <div class="btns">
+      <button id="b-start" class="go">▶ شروع</button>
+      <button id="b-pause" class="warn">⏸ مکث</button>
+      <button id="b-resume" class="go">⏵ ادامه</button>
+      <button id="b-stop" class="warn">⏹ توقف (ذخیره چک‌پوینت)</button>
+      <button id="b-reset" class="danger">✖ ریست کامل</button>
+      <a id="b-download" class="dl" href="/api/download">⬇ دانلود یافته‌ها</a>
+    </div>
+    <p class="hint">راهنما: برای آموزش شبیه‌سازی‌شده، حالت «فقط مشتق‌سازی» را روشن بگذارید؛ آنگاه هیچ درخواست شبکه‌ای ارسال نمی‌شود و خروجی‌ها صرفاً مدل تاریخی RNG هستند.</p>
+  </section>
+
+  <!-- ================= results ================= -->
+  <section class="card">
+    <h2>ولت‌های دارای موجودی <span id="funded-count" class="count">۰</span></h2>
+    <div class="table-wrap">
+      <table id="tbl-funded">
+        <thead><tr><th>بذر</th><th>آدرس</th><th>ETH</th><th>USDT</th><th>USDC</th><th>همه دارایی‌ها (۸ شبکه)</th><th>زمان</th><th>عبارت بازیابی</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="no-hits" class="muted">هنوز موردی یافت نشده است.</p>
+    </div>
+  </section>
+
+  <!-- ================= logs ================= -->
+  <section class="card wide">
+    <h2>لاگ زنده</h2>
+    <pre id="logs" dir="rtl"></pre>
+  </section>
+</main>
+
+<footer>
+  ابزار پژوهشی تدافعی — CVE-2023-31290 / GHSA-pm4f-pggw-8jwc (wallet-core &lt; 3.1.1).
+  بدون ابزار حمله یا بازیابی کلید؛ داده مصنوعی و تحلیل ایزوله. موتور: <code>core/fast_mt.py</code> (اوراکل‌تأییدشده) + <code>core/search_engine.py</code>.
+</footer>
+<script src="/app.js"></script>
+</body>
+</html>
